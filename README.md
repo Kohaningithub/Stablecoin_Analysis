@@ -4,6 +4,8 @@
 
 This repository contains a comprehensive analysis of stablecoin behavior during the Terra/Luna collapse of May 2022. The project examines how different stablecoin designs (algorithmic vs. collateralized) respond to extreme market stress by analyzing over 70 million transactions and daily price data across five major stablecoins (USDT, USDC, DAI, USTC, PAX).
 
+See full paper: [writeup.pdf](writeup.pdf)
+
 ## Key Findings
 
 - **Binary Stability Pattern**: Stablecoin stability operates as a binary state rather than a spectrum, with algorithmic USTC exhibiting a "cliff edge" collapse pattern with minimal warning signs
