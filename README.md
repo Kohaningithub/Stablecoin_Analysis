@@ -30,23 +30,6 @@ The analysis addresses five interconnected questions:
 4. What can we learn from a detailed case study of the USTC collapse?
 5. What broader market behavior patterns emerge during stability events?
 
-## Data
-
-The dataset includes:
-- Over 70 million ERC20 transactions between Ethereum addresses and smart contracts
-- Daily OHLC (open, high, low, close) prices in USD for each token
-- Event data with timestamps and descriptions of significant events
-- Derived stability metrics (peg deviations, volatility measurements, trading volumes)
-- Network metrics (density, reciprocity, modularity, centralization)
-
-## Repository Structure
-
-- `data/`: Raw and processed data files
-- `scripts/`: R scripts for data processing and analysis
-- `analysis.rmd`: Main R Markdown file containing the analysis
-- `visualizations/`: Generated plots and visualizations
-- `results/`: Output files from the analysis
-
 ## Key Visualizations
 
 - Stability regime classifications across stablecoins
@@ -60,12 +43,6 @@ The dataset includes:
 - R 4.0+
 - Required packages: tidyverse, data.table, igraph, lubridate, ggplot2, factoextra, gridExtra, viridis, corrplot, rpart, rpart.plot, randomForest, glmnet
 
-## Usage
-
-1. Clone the repository
-2. Install required R packages
-3. Run the analysis.rmd file to reproduce the analysis
-
 ## Implications
 
 This research has significant implications for:
@@ -74,10 +51,13 @@ This research has significant implications for:
 - Regulatory frameworks (distinguishing between algorithmic and collateralized stablecoins)
 - Early warning systems (requiring sophisticated approaches beyond traditional metrics)
 
-## License
+## Dataset
 
-[MIT License](LICENSE)
+Original dataset provided by researchers from University of Manitoba and University of Texas at Dallas. Downloaded from: http://snap.stanford.edu/data/ERC20-stablecoins.html
 
-## Acknowledgements
-
-Original dataset provided by researchers from University of Manitoba and University of Texas at Dallas.
+The dataset includes:
+- Over 70 million ERC20 transactions between Ethereum addresses and smart contracts
+- Daily OHLC (open, high, low, close) prices in USD for each token
+- Event data with timestamps and descriptions of significant events
+- Derived stability metrics (peg deviations, volatility measurements, trading volumes)
+- Network metrics (density, reciprocity, modularity, centralization)
