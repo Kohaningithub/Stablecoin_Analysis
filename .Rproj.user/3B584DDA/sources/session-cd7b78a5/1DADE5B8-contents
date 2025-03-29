@@ -1,0 +1,112 @@
+---
+title: "Stablecoin Stability LASSO Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(glmnet)
+library(lubridate)
+library(caret)
+library(zoo)
+library(scales)
+```
+
+## Purpose and Methodology
+
+This analysis aims to identify the key predictors of stablecoin stability using LASSO and Ridge regression. The approach combines methods from several previous analyses:
+
+1. **Feature Selection (HW1 approach)**:
+   - Use FDR-controlled marginal screening to identify significant predictors
+   - Control false discoveries while maintaining power
+   - Examine p-value distributions for evidence of signal
+
+2. **Model Selection (HW2 approach)**:
+   - Compare full and reduced models
+   - Use cross-validation for model validation
+   - Examine significance of coefficients
+
+3. **Prediction Performance (HW4 approach)**:
+   - Implement rigorous cross-validation
+   - Compare in-sample and out-of-sample performance
+   - Examine model stability
+
+## Data Preparation
+
+```{r}
+source("lasso_stability.R")
+
+# Load results if not already in environment
+if(!exists("results")) {
+  results <- readRDS("task1_results.rds")
+}
+
+# Check data availability
+cat("Data Summary:\n")
+print(table(results$stability$daily$token))
+cat("\nDate Range:\n")
+print(range(results$stability$daily$date))
+```
+
+## Model Training and Evaluation
+
+The analysis follows these steps:
+
+1. **Feature Engineering**:
+   - Create lagged variables for autocorrelation
+   - Generate rolling statistics
+   - Create interaction terms
+
+2. **Model Selection**:
+   - Use K-fold cross-validation
+   - Compare minimum-MSE vs 1SE lambda
+   - Evaluate model parsimony vs performance
+
+3. **Performance Assessment**:
+   - Examine R² and RMSE metrics
+   - Compare LASSO vs Ridge performance
+   - Analyze feature importance
+
+```{r}
+# Run stability analysis
+stability_results <- run_stability_analysis(results)
+```
+
+## Results Interpretation
+
+```{r}
+# Plot model comparison if we have results
+if(length(stability_results) > 0) {
+  plot_model_comparison(stability_results)
+}
+```
+
+The analysis reveals:
+
+1. **Feature Importance**:
+   - Which predictors are most important for stability
+   - How importance varies across stablecoins
+   - Differences between LASSO and Ridge selection
+
+2. **Model Performance**:
+   - How well we can predict stability
+   - Which stablecoins are more predictable
+   - Evidence of nonlinear relationships
+
+3. **Stability Patterns**:
+   - Common predictors across stablecoins
+   - Unique predictors for specific tokens
+   - Temporal stability patterns
+
+## Conclusions
+
+The LASSO/Ridge analysis provides insights into:
+- Key drivers of stablecoin stability
+- Predictability of different stablecoins
+- Effectiveness of different prediction approaches
+
+These findings can inform:
+- Risk assessment of stablecoins
+- Early warning systems for instability
+- Regulatory considerations 

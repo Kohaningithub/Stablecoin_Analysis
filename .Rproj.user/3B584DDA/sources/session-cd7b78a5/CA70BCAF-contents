@@ -1,0 +1,238 @@
+---
+title: "Homework 6"
+author: "Kohan Chen"
+date: "2025-02-25"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+```{r}
+library(textir) # to get the data
+
+library(maptpx) # for the topics function
+
+data(congress109)
+```
+# 1. Fit K-means to speech text for K in 5,10,15,20,25. Use BIC to choose the K and interpret the selected model.
+
+```{r}
+# Standardize the frequencies
+fs <- scale(as.matrix(congress109Counts/rowSums(congress109Counts)))
+
+# Fit k-means for different values of k
+kfit <- lapply(5*(1:5), function(k) kmeans(fs, k))
+
+# Source the kIC function for calculating information criteria
+source("protein/kIC.R")
+
+# Calculate AIC and BIC
+kaicc <- sapply(kfit, kIC)
+kbic <- sapply(kfit, kIC, "B")
+
+# Plot the results
+par(mfrow=c(1,2))
+plot(5*(1:5), kaicc, xlab="K", ylab="IC",
+     bty="n", type="l", lwd=2)
+abline(v=which.min(kaicc)*5)
+plot(5*(1:5), kbic, xlab="K", ylab="IC",
+     bty="n", type="l", lwd=2, col=4)
+abline(v=which.min(kbic)*5, col=4)
+
+# Select the best model based on BIC
+best_k <- which.min(kbic)
+kmfs <- kfit[[best_k]]
+
+# Interpret the clusters by looking at top words
+top_words <- apply(kmfs$centers, 1, function(c) colnames(fs)[order(-c)[1:10]])
+print(top_words)
+
+print(kmfs$size)
+```
+Based on the BIC plot (blue line), K=5 was selected as the optimal number of clusters (same as AIC). The BIC value shows its minimum at K=5, suggesting this is the best balance between model complexity and explanatory power.
+
+Cluster themes based on top 10 words in each cluster: 
+
+1. **Legislative Process & Immigration Cluster** (371 speeches)
+   - Dominant terms: "look.forward", "strong.support", "urge.support"
+   - Secondary focus: "illegal.immigrant", "border.security", "private.property"
+   - Theme: Legislative support for immigration and border policies
+
+2. **Trade & Jobs Cluster** (9 speeches)
+   - Dominant terms: "billion.trade.deficit", "job.oversea", "manufacturing.job.lost"
+   - Focus: International trade and job outsourcing
+   - Theme: Economic concerns about trade and employment
+
+3. **International Affairs & Energy** (16 speeches)
+   - Dominant terms: "oil.food", "oil.food.program", "food.scandal"
+   - Secondary focus: "united.nation.reform", "atomic.energy.agency"
+   - Theme: International programs and energy policy
+
+4. **Domestic Policy & Social Programs** (132 speeches)
+   - Dominant terms: "private.account", "tax.cut.wealthy", "cut.medicaid"
+   - Secondary focus: "child.support", "cost.war", "cut.food.stamp"
+   - Theme: Social programs and fiscal policy
+
+5. **Gun Policy** (1 speech)
+   - Dominant terms: "able.buy.gun", "buy.gun", "background.check.system"
+   - Focus: Gun control and regulation
+   - Theme: Firearms legislation and safety measures
+
+The cluster distribution is highly uneven. Legislative and immigration cluster dominate. Gun policy appear as a singular focus.
+
+There is clear connection between trade and job related issues and integration of domestic and international policy concerns. Strong focus on fiscal and social welfare programs.
+
+The K-means clustering effectively identifies distinct policy areas in congressional speeches, with clear separation between domestic, international, and specific policy issues. The large size of Cluster 1 suggests that legislative process and immigration were dominant topics in congressional discourse.
+
+# 2. Fit a topic model for the speech counts. Use Bayes factors to choose the number of topics, and interpret your chosen model.
+
+```{r}
+# Convert to slam matrix for topic modeling
+x <- as.simple_triplet_matrix(congress109Counts)
+
+# Fit topic models and use Bayes factors to choose number of topics
+tpcs <- topics(x, K=2:25)  # Try different numbers of topics
+
+# Look at the interpretation
+# Ordering by topic over aggregate lift
+summary(tpcs, n=5)
+
+# Print top words for each topic ordered by probability
+print("Top words by probability for each topic:")
+for(i in 1:length(tpcs$theta[1,])) {
+  cat("\nTopic", i, ":\n")
+  print(rownames(tpcs$theta)[order(tpcs$theta[,i], decreasing=TRUE)[1:10]])
+}
+
+# Look at party mean memberships
+DemO <- colMeans(tpcs$omega[congress109Ideology$party=="D",])
+RepO <- colMeans(tpcs$omega[congress109Ideology$party=="R",])
+sort(DemO/RepO)  # Ratio of Democrat to Republican usage
+
+# Create word clouds for visualization
+library(wordcloud)
+par(mfrow=c(2,2))
+for(i in 1:4) {  # Show first 4 topics
+  wordcloud(row.names(tpcs$theta), 
+           freq=tpcs$theta[,i], 
+           min.freq=0.004, 
+           col=rainbow(4)[i],
+           main=paste("Topic", i))
+}
+```
+
+Based on the Log Bayes factors shown in the output, K=12 topics was selected as optimal. 
+The Log Bayes factors increase until K=12 and then decrease at K=13,14. K=12 has logBF = 79713.54, the highest value. This suggests 12 distinct topics optimally describe the congressional speeches
+
+There is clear partisan divide in topic usage among republican and democrat. Republicans focus more on economic, security, and proprety issues. Democrats focus on social programs, civil rights, and economic justice.
+
+### Republican-Favored Topics (ratio < 1):
+1. Economic Policy (0.30): tax relief, economic growth, budget
+2. Energy & Resources (0.32): natural gas, climate change
+3. Postal & Property (0.34): postal service, private property
+4. War & Security (0.39): Iraq war, terrorism
+
+### Balanced Topics (ratio = 1):
+5. Medical Research (0.42): stem cell research, healthcare
+6. Judicial Matters (0.53): judicial nominees, court appointments
+
+### Democrat-Favored Topics (ratio > 1):
+7. Trade Policy (1.58): trade agreements, worker protection
+8. Environmental Issues (1.99): wildlife, energy independence
+9. Civil Rights (2.29): civil rights, domestic violence
+10. Social Programs (2.66): low income support, veterans
+11. Economic Justice (4.35): minimum wage, consumer protection
+12. Social Security (9.26): retirement, middle class
+
+Most polarized topics include Social Security (9.26x more Democratic usage) and Most balanced topic: Judicial Matters (0.53 ratio). 
+
+Republicans' policy priorities include Economic growth, national security, property rights. While democrats focus on Social welfare, civil rights, environmental protection.
+
+The topic model reveals the clear ideological differences in policy priorities and rhetoric.
+
+# 3. Connect unsupervised clusters to partisanship
+
+```{r}
+# Tabulate party membership by K-means cluster
+party_clusters <- tapply(congress109Ideology$party, kmfs$cluster, table)
+print("Party distribution in each cluster:")
+print(party_clusters)
+
+# Fit topic regression for party (binary: Republican vs Democrat)
+library(gamlr)
+# omega is the n x K matrix of document topic weights
+gop <- congress109Ideology[,"party"]=="R"
+partyreg <- gamlr(tpcs$omega, gop, family="binomial")
+
+# Show odds multipliers for 0.1 rise in topic weight
+print("Odds multipliers for 0.1 increase in topic weight:")
+print(exp(coef(partyreg)*0.1))
+
+# Regression for repshare (continuous measure of Republican share)
+repreg <- gamlr(tpcs$omega, congress109Ideology[,"repshare"])
+
+# Show effect on repshare per 0.1 rise in topic
+print("Change in repshare per 0.1 increase in topic weight:")
+print(coef(repreg)*0.1)
+
+# Compare to straight regression.
+regtopics.cv <- cv.gamlr(tpcs$omega, gop, family="binomial")
+## give it the word %s as inputs
+x <- 100*congress109Counts/rowSums(congress109Counts)
+regwords.cv <- cv.gamlr(x, gop, family="binomial")
+
+par(mfrow=c(1,2))
+plot(regtopics.cv, main="topic regression")
+plot(regwords.cv, main="phrase count regression")
+# max OOS R^2s
+max(1-regtopics.cv$cvm/regtopics.cv$cvm[1])
+max(1-regwords.cv$cvm/regwords.cv$cvm[1])
+```
+
+Topic regression (0.52) explains partisan differences better than raw phrase counts (0.36).
+
+## Analysis of Partisanship in Congressional Speech
+
+The K-means clustering reveals strong partisan patterns in congressional speeches:
+
+1. **Partisan Clusters**: Most clusters show clear partisan alignment:
+   - Cluster 1 (15 speeches): 93% Republican (14R, 0D, 1I)
+   - Cluster 2 (360 speeches): 73% Republican (261R, 98D, 1I)
+   - Cluster 3 (132 speeches): 99% Democratic (131D, 0R, 1I)
+   - Cluster 4 (3 speeches): 67% Republican (2R, 1D, 0I)
+
+2. **Non-Partisan Cluster**: Only Cluster 5 (19 speeches) shows balanced representation with 42% Republican (8R, 11D, 0I), making it the only relatively non-partisan cluster.
+
+The topic regression results provide deeper insights into partisan speech patterns:
+
+1. **Strong Republican Indicators** (odds multipliers > 1):
+    - Topic 6 shows the strongest Republican association (2.58x odds)
+    - Topics 8 (1.37x), 11 (1.18x), 1 (1.19x), and 2 (1.18x) also predict Republican speech
+
+2. **Strong Democratic Indicators** (odds multipliers < 1):
+    - Topic 5 is the strongest Democratic predictor (0.17x odds of being Republican)
+    - Topics 12 (0.47x), 10 (0.69x), 4 (0.72x), topics 3 (0.72), and 9 (0.75x) also predict Democratic speech
+
+3. **Neutral Topics**:
+   - Topic 7 is essentially neutral (1.00x odds)
+
+The regression on Republican vote share (repshare) confirms these patterns:
+    - The intercept has the largest positive effect (5.7% baseline increase)
+    - Topic 3 has a substantial negative effect (-2.5% decrease)
+    - Topic 11 shows a strong negative effect (-2.2% decrease)
+    - Topic 5 has a notable negative effect (-2.2% decrease)
+    - Topics 9 and 10 show moderate negative effects (-1.0% and -1.1%)
+    - Topics 6, 8, and 1 show small positive effects (0.7%, 0.7%, and 0.5%)
+
+These results demonstrate that congressional speech is highly partisan, with clear differences in topic emphasis between parties. 
+
+Comparing topic regression to phrase count regression:
+   - Topic regression achieves higher predictive accuracy (R² = 0.52 vs. 0.36)
+   - The left graph shows topic regression maintains low deviance with minimal regularization, while phrase count regression (right) requires heavy regularization to reduce noise
+   - Topic regression shows a flat deviance curve, indicating model stability across regularization levels
+   - All 12 topics remain informative at optimal regularization, while phrase count regression must drop from 248 to 193 variables
+   - Topic modeling effectively distills hundreds of phrases into 12 coherent themes, making interpretation more straightforward
+
+These results demonstrate that congressional speech is highly partisan, with clear differences in topic emphasis between parties. The topic model effectively captures these partisan patterns with relatively few dimensions, suggesting that the underlying political discourse can be represented by a small number of polarized themes. Only one cluster (5) shows balanced partisan representation, indicating that most congressional speech falls along predictable party lines.

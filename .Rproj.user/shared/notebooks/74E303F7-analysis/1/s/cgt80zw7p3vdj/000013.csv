@@ -1,0 +1,4 @@
+"0","  "
+"0","  # Add annotation about missing values"
+"0","  mtext(""Note: '?' indicates insufficient data for WLUNA correlations due to its extreme price behavior"", "
+"0","        side = 1, line = 4, cex = 0.8)"

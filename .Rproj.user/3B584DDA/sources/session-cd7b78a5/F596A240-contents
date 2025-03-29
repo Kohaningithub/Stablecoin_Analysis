@@ -1,0 +1,46 @@
+# Load libraries
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(zoo)
+
+# Load data
+results <- readRDS("task1_results.rds")
+
+# Print initial data structure
+print("Initial data structure:")
+str(results$stability$daily)
+str(results$network_metrics)
+
+# Try data preparation
+source("stability_trees.R")
+tree_data <- prepare_tree_data(results)
+
+# Check prepared data
+print("\nPrepared data summary:")
+print(paste("Number of rows:", nrow(tree_data)))
+print(paste("Number of columns:", ncol(tree_data)))
+print("\nColumns:")
+print(names(tree_data))
+
+# Check class distribution by token
+print("\nClass distribution by token:")
+print(table(tree_data$token, tree_data$stability_class))
+
+# Try fitting a simple tree for one token
+token_name <- "USDT"
+token_data <- tree_data %>%
+  filter(token == token_name) %>%
+  select(-token, -date)
+
+print("\nFitting tree for USDT...")
+tree <- rpart(stability_class ~ ., data = token_data, method = "class")
+
+# Try plotting
+print("\nAttempting to plot...")
+png("img/test_tree.png", width=800, height=600)
+print(rpart.plot(tree))
+dev.off()
+
+print("Test complete. Check img/test_tree.png") 

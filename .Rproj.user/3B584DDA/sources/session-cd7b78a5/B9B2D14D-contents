@@ -1,0 +1,28 @@
+---
+output: 
+  pdf_document
+---
+
+\begin{center}
+\includegraphics[width=0.6\textwidth]{/Users/kohanchen/Documents/2025_Winter/Big_Data/Final/Final_new/img/chicago-booth_logo.jpg}
+
+\vspace{1cm}
+{\Large\textbf{BUSN 41201 - Big Data}}
+
+{\large Winter Quarter 2025 - Professor Veronika Rockova}
+
+\vspace{1.5cm}
+{\huge\textbf{Stablecoin Stability Analysis:}}
+
+{\Large Comparing Algorithmic and Collateralized Designs During Market Stress}
+
+\vspace{1.5cm}
+{\large March 15, 2025}
+
+{\large By Kohan Chen}
+
+\vspace{1cm}
+{\large\textit{This assignment pledged to Booth honor code.}}
+\end{center}
+
+\newpage

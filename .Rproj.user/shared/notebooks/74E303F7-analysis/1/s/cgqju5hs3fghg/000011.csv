@@ -1,0 +1,8 @@
+"0","  "
+"0","  # Create a table of the actual addresses for reference"
+"0","  address_reference <- top_terms %>%"
+"0","    select(topic_name, address_pair, weight) %>%"
+"0","    arrange(topic_name, desc(weight))"
+"0","  "
+"0","  # Print the reference table"
+"0","  print(address_reference)"

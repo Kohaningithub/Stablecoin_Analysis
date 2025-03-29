@@ -1,0 +1,8 @@
+"0",""
+"0","# Examine key addresses during the crash"
+"0","crash_key_addresses <- results$key_addresses$crash %>%"
+"0","  arrange(token, desc(centrality_score)) %>%"
+"0","  group_by(token) %>%"
+"0","  slice_head(n = 5)"
+"0",""
+"0","print(crash_key_addresses)"

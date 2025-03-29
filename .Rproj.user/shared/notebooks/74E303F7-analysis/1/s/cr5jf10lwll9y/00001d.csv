@@ -1,0 +1,5 @@
+"0",""
+"0","# Visualize changes in network density"
+"0","ggplot(results$network_metrics, aes(x = period, y = density, fill = token)) +"
+"0","  geom_bar(stat = ""identity"", position = ""dodge"") +"
+"0","  labs(title = ""Network Density Across Periods"", x = ""Period"", y = ""Density"")"

@@ -1,0 +1,227 @@
+library(tidyverse)
+
+# Load and prepare the sentiment dataset
+sentiment_data <- read.csv("sentiment.csv")
+
+# Convert dates to proper format and filter for relevant period
+sentiment_data <- sentiment_data %>%
+  mutate(Date = as.POSIXct(Date, format="%Y-%m-%d %H:%M:%S%z", tz="UTC")) %>%
+  mutate(date = as.Date(Date)) %>%
+  filter(date >= as.Date("2022-04-01") & date <= as.Date("2022-06-30"))
+
+# Create flags for stablecoin mentions
+sentiment_data <- sentiment_data %>%
+  mutate(
+    # Check for NULL or NA in Tweet before applying grepl
+    Tweet = ifelse(is.null(Tweet) | is.na(Tweet), "", Tweet),
+    
+    # Create flags for each type of stablecoin
+    mentions_ust = grepl("UST|USTC|Terra|Luna|WLUNA", Tweet, ignore.case = TRUE),
+    mentions_usdt = grepl("USDT|Tether", Tweet, ignore.case = TRUE),
+    mentions_usdc = grepl("USDC|Circle", Tweet, ignore.case = TRUE),
+    mentions_dai = grepl("DAI|Maker", Tweet, ignore.case = TRUE),
+    mentions_stablecoin = grepl("stablecoin|stable coin|peg", Tweet, ignore.case = TRUE),
+    
+    # Create an "any stablecoin" flag
+    mentions_any = mentions_ust | mentions_usdt | mentions_usdc | mentions_dai | mentions_stablecoin
+  )
+
+# Count tweet mentions for diagnostics
+counts <- list(
+  "Total tweets in period" = nrow(sentiment_data),
+  "Tweets mentioning any stablecoin" = sum(sentiment_data$mentions_any),
+  "Tweets mentioning UST/Terra/Luna" = sum(sentiment_data$mentions_ust),
+  "Tweets mentioning USDT/Tether" = sum(sentiment_data$mentions_usdt),
+  "Tweets mentioning USDC/Circle" = sum(sentiment_data$mentions_usdc),
+  "Tweets mentioning DAI/Maker" = sum(sentiment_data$mentions_dai),
+  "Tweets mentioning 'stablecoin'" = sum(sentiment_data$mentions_stablecoin)
+)
+
+# Print counts
+for(name in names(counts)) {
+  cat(paste0(name, ": ", counts[[name]], "\n"))
+}
+
+# Calculate daily sentiment for UST/Terra/Luna
+daily_ust_sentiment <- sentiment_data %>%
+  filter(mentions_ust) %>%
+  group_by(date) %>%
+  summarize(
+    avg_sentiment = mean(sentiment, na.rm = TRUE),
+    sentiment_volume = n(),
+    pct_positive = mean(sentiment == 3, na.rm = TRUE) * 100,
+    pct_negative = mean(sentiment == 1, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Handle potential empty result if no matches found
+if(nrow(daily_ust_sentiment) == 0) {
+  cat("Warning: No tweets found mentioning UST/Terra/Luna in this time period.\n")
+  cat("Creating placeholder sentiment data...\n")
+  
+  # Create placeholder data with neutral sentiment
+  date_range <- seq(as.Date("2022-04-01"), as.Date("2022-06-30"), by = "day")
+  daily_ust_sentiment <- data.frame(
+    date = date_range,
+    avg_sentiment = 2,  # Neutral
+    sentiment_volume = 0,
+    pct_positive = 0,
+    pct_negative = 0
+  )
+}
+
+# Merge with stability data for USTC with proper NA handling
+ustc_with_sentiment <- stability_regimes %>%
+  filter(token == "USTC") %>%
+  # Left join can introduce NAs when dates don't match
+  left_join(daily_ust_sentiment, by = "date")
+
+# Check for NAs in the merged data
+na_count <- sum(is.na(ustc_with_sentiment$peg_deviation))
+if(na_count > 0) {
+  cat("Warning:", na_count, "NA values found in peg_deviation.\n")
+}
+
+# Handle missing values by imputation
+ustc_with_sentiment <- ustc_with_sentiment %>%
+  # First impute missing sentiment values
+  mutate(
+    avg_sentiment = ifelse(is.na(avg_sentiment), 2, avg_sentiment), # Default to neutral
+    sentiment_volume = ifelse(is.na(sentiment_volume), 0, sentiment_volume),
+    pct_positive = ifelse(is.na(pct_positive), 0, pct_positive),
+    pct_negative = ifelse(is.na(pct_negative), 0, pct_negative)
+  ) %>%
+  # Drop any rows with NA in essential columns (only if necessary)
+  filter(!is.na(peg_deviation))
+
+# Calculate rolling averages safely
+library(zoo)
+ustc_with_sentiment <- ustc_with_sentiment %>%
+  arrange(date) %>%
+  mutate(
+    # Use na.rm=TRUE for all rolling calculations
+    avg_sentiment_7d = rollapply(avg_sentiment, width=7, FUN=function(x) mean(x, na.rm=TRUE), 
+                                 fill=NA, align="right", partial=TRUE),
+    volume_7d = rollapply(sentiment_volume, width=7, FUN=function(x) mean(x, na.rm=TRUE), 
+                          fill=NA, align="right", partial=TRUE)
+  )
+
+# Make sure there are no NAs in the rolling calculations
+ustc_with_sentiment <- ustc_with_sentiment %>%
+  mutate(
+    avg_sentiment_7d = ifelse(is.na(avg_sentiment_7d), avg_sentiment, avg_sentiment_7d),
+    volume_7d = ifelse(is.na(volume_7d), sentiment_volume, volume_7d)
+  )
+
+# Check the data before visualization
+cat("Rows in USTC with sentiment data:", nrow(ustc_with_sentiment), "\n")
+cat("NA count in key columns:\n")
+print(sapply(ustc_with_sentiment[c("date", "peg_deviation", "avg_sentiment", "avg_sentiment_7d")], 
+             function(x) sum(is.na(x))))
+
+# Now safe to visualize
+p_sentiment <- ggplot(ustc_with_sentiment, aes(x = date)) +
+  geom_line(aes(y = scale(peg_deviation), color = "Peg Deviation"), size = 1) +
+  geom_line(aes(y = scale(avg_sentiment_7d), color = "Sentiment (7d avg)"), size = 1) +
+  geom_area(aes(y = scale(volume_7d)/3, fill = "Tweet Volume"), alpha = 0.3) +
+  geom_vline(xintercept = as.Date("2022-05-08"), linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-05-15"), linetype = "dashed") +
+  labs(title = "USTC Peg Deviation vs. Social Sentiment",
+       subtitle = "Standardized values for comparison",
+       x = "Date", y = "Standardized Value",
+       color = "Metric", fill = "Volume") +
+  scale_color_manual(values = c("Peg Deviation" = "#EF5350", 
+                                "Sentiment (7d avg)" = "#42A5F5")) +
+  scale_fill_manual(values = c("Tweet Volume" = "#BBDEFB")) +
+  theme_minimal()
+
+print(p_sentiment)
+save_last_plot("ustc_sentiment_analysis")
+
+# Analyze leading indicator potential - with robust NA handling
+sentiment_lead_analysis <- ustc_with_sentiment %>%
+  arrange(date) %>%
+  mutate(
+    # Create lead/lag variables
+    next_day_deviation = lead(peg_deviation, 1),
+    next_3day_deviation = lead(peg_deviation, 3),
+    prev_day_sentiment = lag(avg_sentiment, 1),
+    prev_3day_sentiment = lag(avg_sentiment, 3)
+  ) %>%
+  # Remove rows with NAs in these computed columns
+  filter(!is.na(next_day_deviation), 
+         !is.na(next_3day_deviation),
+         !is.na(prev_day_sentiment),
+         !is.na(prev_3day_sentiment))
+
+# Only calculate correlations if we have sufficient data
+if(nrow(sentiment_lead_analysis) >= 5) {
+  # Calculate correlations with NA handling
+  sentiment_cors <- cor(
+    sentiment_lead_analysis %>% 
+      select(peg_deviation, next_day_deviation, next_3day_deviation,
+             avg_sentiment, prev_day_sentiment, prev_3day_sentiment,
+             sentiment_volume),
+    use = "pairwise.complete.obs"
+  )
+  
+  print("Correlation matrix:")
+  print(round(sentiment_cors, 3))
+  
+  # Create scatter plot if sufficient data
+  ggplot(sentiment_lead_analysis, 
+         aes(x = avg_sentiment, y = next_day_deviation)) +
+    geom_point() +
+    geom_smooth(method = "loess", na.rm = TRUE) +
+    labs(title = "Sentiment Score vs Next-Day Peg Deviation",
+         x = "Sentiment Score", 
+         y = "Next-Day Peg Deviation") +
+    theme_minimal()
+  
+  save_last_plot("sentiment_prediction_scatter")
+} else {
+  cat("Insufficient data for correlation analysis after handling NA values.\n")
+}
+
+# Enhance the forward chain model with sentiment features (if available)
+if(exists("enhanced_data") && "USTC" %in% enhanced_data$token) {
+  # Add sentiment features to enhanced data with proper NA handling
+  enhanced_sentiment_data <- enhanced_data %>%
+    filter(token == "USTC") %>%
+    left_join(daily_ust_sentiment, by = "date") %>%
+    mutate(
+      avg_sentiment = ifelse(is.na(avg_sentiment), 2, avg_sentiment),
+      sentiment_volume = ifelse(is.na(sentiment_volume), 0, sentiment_volume)
+    ) %>%
+    # Important: Remove any NA values in prediction features
+    filter(!is.na(peg_deviation), !is.na(peg_deviation_lag1))
+  
+  # Check if we have sufficient data for modeling
+  if(nrow(enhanced_sentiment_data) >= 30) {
+    # Run forward chain validation with sentiment features
+    sentiment_model_results <- tryCatch({
+      forward_chain_validate(
+        enhanced_sentiment_data, 
+        "USTC", 
+        window_size = 14
+      )
+    }, error = function(e) {
+      cat("Error in forward chain validation with sentiment:", e$message, "\n")
+      return(NULL)
+    })
+    
+    if(is.list(sentiment_model_results)) {
+      cat("\nResults with sentiment features:\n")
+      cat("RMSE:", round(sentiment_model_results$rmse, 6), "\n")
+      cat("R²:", round(sentiment_model_results$r2, 2), "\n")
+      
+      # Print feature importance if available
+      if(!is.null(sentiment_model_results$feature_importance)) {
+        cat("\nFeature importance with sentiment:\n")
+        print(sentiment_model_results$feature_importance)
+      }
+    }
+  } else {
+    cat("Insufficient data for sentiment-enhanced forward chain validation.\n")
+  }
+}

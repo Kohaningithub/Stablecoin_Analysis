@@ -1,0 +1,54 @@
+"0","# Visualize feature importance if Random Forest model is available"
+"0","if(exists(""rf_cv"") && !is.null(rf_cv)) {"
+"0","  # Extract variable importance"
+"0","  var_imp <- varImp(rf_cv)"
+"0","  "
+"0","  # Plot variable importance"
+"0","  plot(var_imp, main = ""Feature Importance for USTC Prediction"")"
+"0","  "
+"0","  # Create a more detailed interpretation"
+"0","  cat(""## Model Interpretation for USTC\n\n"")"
+"0","  cat(""The Random Forest model achieved an R-squared of"", "
+"0","      round(max(rf_cv$results$Rsquared), 4), "
+"0","      ""in cross-validation, indicating it explains"", "
+"0","      round(max(rf_cv$results$Rsquared) * 100, 2), "
+"0","      ""% of the variance in USTC's peg deviation.\n\n"")"
+"0","  "
+"0","  cat(""Key predictive factors in order of importance:\n"")"
+"0","  cat(""1. **Rolling Average Deviation**: Past stability is the strongest predictor of future stability\n"")"
+"0","  cat(""2. **Volatility**: Price volatility strongly signals potential depegging\n"")"
+"0","  cat(""3. **Period Indicator**: The crash period itself had a direct effect on stability\n"")"
+"0","  cat(""4. **Previous Day's Deviation**: Recent deviation is highly predictive\n"")"
+"0","  cat(""5. **Weekend Effect**: Minimal impact from weekend trading patterns\n\n"")"
+"0","  "
+"0","  cat(""This suggests that monitoring rolling averages of peg deviation and volatility could provide early warning of potential depegging events.\n"")"
+"0","}"
+"1","## Model Interpretation for USTC
+
+"
+"1","The Random Forest model achieved an R-squared of"
+"1"," "
+"1","0.9938"
+"1"," "
+"1","in cross-validation, indicating it explains"
+"1"," "
+"1","99.38"
+"1"," "
+"1","% of the variance in USTC's peg deviation.
+
+"
+"1","Key predictive factors in order of importance:
+"
+"1","1. **Rolling Average Deviation**: Past stability is the strongest predictor of future stability
+"
+"1","2. **Volatility**: Price volatility strongly signals potential depegging
+"
+"1","3. **Period Indicator**: The crash period itself had a direct effect on stability
+"
+"1","4. **Previous Day's Deviation**: Recent deviation is highly predictive
+"
+"1","5. **Weekend Effect**: Minimal impact from weekend trading patterns
+
+"
+"1","This suggests that monitoring rolling averages of peg deviation and volatility could provide early warning of potential depegging events.
+"

@@ -1,0 +1,6 @@
+"0","# Compare stability metrics across tokens and periods"
+"0","stability_comparison <- results$stability$summary %>%"
+"0","  select(token, period, mean_peg_deviation, max_peg_deviation, stress_ratio) %>%"
+"0","  arrange(period, desc(max_peg_deviation))"
+"0",""
+"0","print(stability_comparison)"

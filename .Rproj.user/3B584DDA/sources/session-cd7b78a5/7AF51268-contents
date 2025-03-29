@@ -1,0 +1,233 @@
+---
+title: "Assignment 4"
+author: "Kohan Chen"
+date: "2025-02-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r Given Code}
+## microfinance network 
+## data from BANERJEE, CHANDRASEKHAR, DUFLO, JACKSON 2012
+
+## data on 8622 households
+hh <- read.csv("/Users/kohanchen/Documents/2025 Winter/Big Data/HW4/microfi_households.csv", row.names="hh")
+hh$village <- factor(hh$village)
+
+## We'll kick off with a bunch of network stuff.
+## This will be covered in more detail in lecture 6.
+## get igraph off of CRAN if you don't have it
+## install.packages("igraph")
+## this is a tool for network analysis
+## (see http://igraph.sourceforge.net/)
+library(igraph)
+edges <- read.table("/Users/kohanchen/Documents/2025 Winter/Big Data/HW4/microfi_edges.txt", colClasses="character")
+## edges holds connections between the household ids
+hhnet <- graph.edgelist(as.matrix(edges))
+hhnet <- as.undirected(hhnet) # two-way connections.
+
+## igraph is all about plotting.  
+V(hhnet) ## our 8000+ household vertices
+## Each vertex (node) has some attributes, and we can add more.
+V(hhnet)$village <- as.character(hh[V(hhnet),'village'])
+## we'll color them by village membership
+vilcol <- rainbow(nlevels(hh$village))
+names(vilcol) <- levels(hh$village)
+V(hhnet)$color = vilcol[V(hhnet)$village]
+## drop HH labels from plot
+V(hhnet)$label=NA
+
+# graph plots try to force distances proportional to connectivity
+# imagine nodes connected by elastic bands that you are pulling apart
+# The graphs can take a very long time, but I've found
+# edge.curved=FALSE speeds things up a lot.  Not sure why.
+
+## we'll use induced.subgraph and plot a couple villages 
+village1 <- induced.subgraph(hhnet, v=which(V(hhnet)$village=="1"))
+village33 <- induced.subgraph(hhnet, v=which(V(hhnet)$village=="33"))
+
+# vertex.size=3 is small.  default is 15
+plot(village1, vertex.size=3, edge.curved=FALSE)
+plot(village33, vertex.size=3, edge.curved=FALSE)
+
+######  now, on to your homework stuff
+
+library(gamlr)
+
+## match id's; I call these 'zebras' because they are like crosswalks
+zebra <- match(rownames(hh), V(hhnet)$name)
+
+## calculate the `degree' of each hh: 
+##  number of commerce/friend/family connections
+degree <- degree(hhnet)[zebra]
+names(degree) <- rownames(hh)
+degree[is.na(degree)] <- 0 # unconnected houses, not in our graph
+
+## if you run a full glm, it takes forever and is an overfit mess
+# > summary(full <- glm(loan ~ degree + .^2, data=hh, family="binomial"))
+# Warning messages:
+# 1: glm.fit: algorithm did not converge 
+# 2: glm.fit: fitted probabilities numerically 0 or 1 occurred 
+```
+
+## [1] Transforming Degree to Create Treatment Variable d
+
+```{r Q1}
+library(gamlr)
+source("/Users/kohanchen/Documents/2025 Winter/Big Data/HW4/naref.R")
+hh <- naref(hh)
+hist(degree, main="Distribution of Network Degrees", breaks=50)
+summary(degree)
+# Create a binary treatment variable based on median degree
+d <- as.numeric(degree > median(degree))
+```
+
+The hh data frame is processed using naref to ensure that any factor variables have NA as their reference level.
+
+Transform the degree variable, which quantifies the number of connections each household has, into a binary treatment variable (d). This transformation simplifies the analysis by categorizing households into "treated" (highly connected) and "control" (less connected) groups that binary variables are easier to handle and interpret. Also, it clearly distinguishes between households with high and low connectivity and help mitigates Outliers which reduces the influence of extreme values.
+
+## [2] Building a Model to Predict d from Controls x. Comment on how tight the fit is, and what that implies for estimation of a treatment effect.
+
+```{r Q2}
+library(Matrix) 
+
+# Create sparse matrix of control variables
+x <- sparse.model.matrix(~ . - loan - village, data=hh)[,-1]
+
+# Fit lasso model to predict d
+d_model <- cv.gamlr(x, d, family="binomial")
+
+# Access the gamlr object from cv.gamlr
+best_lambda <- which.min(AICc(d_model$gamlr))
+dev <- d_model$gamlr$deviance[best_lambda]
+dev0 <- d_model$gamlr$deviance[1]
+r2_dev <- 1 - dev/dev0
+
+
+cat("Deviance-based R²:", r2_dev, "\n")
+```
+
+The low R² suggests weak predictive power of the controls for treatment assignment. This indicates potential for valid causal inference as treatment might be as-good-as-random, conditional on observables.
+
+The analysis reveals a notably low deviance-based R² of approximately 0.022 (2.2%), indicating that the control variables have very limited power in predicting network degree. This weak fit is particularly informative for our causal inference objectives. The fact that observable characteristics explain only about 2.2% of the variation in network degree suggests that treatment assignment (high vs. low connectivity) appears to be nearly random with respect to our observed covariates. This finding is favorable for causal inference, as it indicates minimal selection on observables and reduces concerns about systematic confounding.
+
+This low R² has positive implications for our ability to estimate treatment effects. When observable characteristics have such weak predictive power over treatment status, it strengthens the plausibility of the unconfoundedness assumption - the idea that treatment assignment might be conditionally independent of potential outcomes. In other words, whether a household has high or low network connectivity appears to be largely independent of their observable characteristics, suggesting that any differences in loan outcomes between high and low connectivity households are more likely to represent genuine causal effects rather than selection effects.
+
+However, we should maintain some caution in our interpretation. While the low R² suggests minimal selection on observables, it's important to remember that unobserved confounders could still exist and bias our treatment effect estimates. Nevertheless, the weak predictive relationship between controls and treatment status provides encouraging evidence that our subsequent treatment effect estimates may have a more credible causal interpretation, particularly when we still control for these observable characteristics in our final analysis.
+
+## [3]. Use predictions from [2] in an estimator for effect of d on loan.
+
+```{r Q3 Double ML approach}
+d_hat <- predict(d_model, x, type="response")
+
+# Calculate residualized treatment
+d_resid <- d - d_hat
+
+# Fit model with residualized treatment
+effect_model <- glm(hh$loan ~ d_resid, family="binomial")
+
+# View results
+summary(effect_model)
+
+exp(0.16276)
+```
+
+I obtain predicted probabilities (d_hat) from our LASSO model in question 2. These predictions represent the component of treatment (network degree) that can be explained by our control variables. By subtracting these predictions from the actual treatment values (d - d_hat), we create a residualized treatment variable (d_resid) that represents the variation in network degree that cannot be explained by our controls.
+
+We then estimate the treatment effect by regressing the loan outcome (accessed directly from the hh data frame using hh\$loan) on these residuals using a logistic regression model. This two-stage approach helps isolate the causal effect of network degree on loan uptake by controlling for the confounding influence of observable characteristics. The coefficient 0.16276, which exp(0.16276) = 1.177, suggests that households with higher network degrees (after controlling for observable characteristics) have approximately 17.7% higher odds of taking a loan compared to those with lower network degrees.
+
+Given our earlier finding of low R² (2.2%) in predicting treatment status, this effect is more likely to represent a causal relationship rather than mere correlation.
+
+The model's overall fit statistics (null deviance: 7155.0, residual deviance: 7148.1) suggest that while the effect is statistically significant, the model explains a relatively small portion of the total variation in loan uptake.
+
+## Compare the results from [3] to those from a straight (naive) lasso for loan on d and x. Explain why they are similar or different.
+
+```{r Q4}
+# Naive LASSO approach
+naive_model <- cv.gamlr(cbind(d, x), hh$loan, family="binomial")
+coef_naive <- coef(naive_model)[2]  # coefficient for d
+
+# Compare coefficients
+cat("Double ML estimate:", coef(effect_model)[2], "\n")
+cat("Naive Lasso estimate:", coef_naive, "\n")
+```
+
+Double ML estimate: 0.1627599 (positive and significant effect)
+
+Naive LASSO estimate: 0 (no effect)
+
+The naive LASSO model has reduced the treatment coefficient to zero, meaning that when the model considers all variables together while applying regularization, it does not find the network degree variable important enough to keep.
+
+This demonstrates a key limitation of naive LASSO for causal inference: the regularization penalty can eliminate genuinely important causal effects if they're not strong enough to overcome the penalty threshold.
+
+The Double ML approach, by first residualizing the treatment variable, protects the treatment effect from being shrunk to zero by regularization.
+
+The significant positive coefficient (0.1627599) suggests that once we properly account for confounding through residualization, there is indeed a meaningful effect of network degree on loan uptake.
+
+This aligns with our finding from Question 2 that control variables explain very little of the treatment variation (R² = 2.2%).
+
+This comparison provides a compelling case for using Double ML over naive LASSO when the goal is causal inference rather than prediction.
+
+## [5] Bootstrap your estimator from [3] and describe the uncertainty.
+
+```{r Q5}
+set.seed(123)
+
+# Bootstrap function
+boot_estimate <- function(B=1000) {
+  n <- nrow(hh)
+  estimates <- numeric(B)
+  
+  # Pre-compute the original model's predictions
+  d_hat <- predict(d_model, x, type="response")
+  
+  for(i in 1:B) {
+    # Sample indices with replacement
+    idx <- sample(n, replace=TRUE)
+    
+    # Residualize treatment using original d_hat (this is key!)
+    d_resid_boot <- d[idx] - d_hat[idx]
+    
+    # Fit outcome model on bootstrap sample
+    effect_model_boot <- glm(hh$loan[idx] ~ d_resid_boot, family="binomial")
+    
+    # Store the treatment effect estimate
+    estimates[i] <- coef(effect_model_boot)[2]
+  }
+  
+  return(estimates)
+}
+
+# Run bootstrap
+boot_results <- boot_estimate(B=1000)
+
+# Calculate summary statistics
+boot_mean <- mean(boot_results)
+boot_sd <- sd(boot_results)
+boot_ci <- quantile(boot_results, c(0.025, 0.975))
+
+# Display results
+cat("Bootstrap Results:\n")
+cat("Mean estimate:", boot_mean, "\n")
+cat("Standard deviation:", boot_sd, "\n")
+cat("95% CI: [", boot_ci[1], ",", boot_ci[2], "]\n")
+
+# Create histogram of bootstrap estimates
+hist(boot_results, breaks=50, main="Bootstrap Distribution of Treatment Effect",
+     xlab="Estimated Effect", freq=FALSE)
+abline(v=boot_mean, col="red", lwd=2)
+abline(v=boot_ci, col="blue", lty=2, lwd=2)
+```
+
+The bootstrap analysis reveals a stable and significant treatment effect estimate. The distribution of bootstrap estimates is approximately normal with a slight right skew, centered around a mean of 0.163 (very close to our original estimate of 0.163). The 95% confidence interval [0.045, 0.281], with a standard deviation of 0.062, indicates meaningful uncertainty in the precise magnitude but provides strong evidence of a positive effect since it excludes zero. This means that even at the lower bound of our confidence interval, higher network degree is associated with increased loan uptake.
+
+The spread of estimates suggests moderate uncertainty, but the close alignment between the bootstrap mean and our original point estimate supports the robustness of our findings. The fact that the bootstrap mean closely aligns with our original point estimate (shown by the red vertical line) provides additional confidence in the stability of our findings. While we can confidently conclude that higher network degree increases loan uptake, the width of the confidence interval suggests we should be cautious about making precise claims about the magnitude of this effect.
+
+## Bonus Can you think of how you'd design an experiment to estimate the treatment effect of network degree?
+
+To estimate the causal effect of network degree on loan uptake, I propose a randomized experiment at the village level. The design would randomly assign villages to either treatment or control groups, with treatment villages receiving interventions designed to increase social and economic connections among households. These interventions could include organized community networking events, facilitated business group formations, and structured opportunities for household interactions. Control villages would maintain their normal social patterns without additional networking interventions. This cluster-randomized approach helps minimize spillover effects between treatment and control units, which is crucial when studying network effects.
+
+The experiment would run for approximately 12 months, with careful data collection at baseline and endline to measure both network connections and loan uptake. To ensure robust causal inference, the design would include several key features: stratified randomization based on baseline village characteristics to ensure balance, power calculations to determine the appropriate number of villages needed, and comprehensive data collection including network mapping, loan tracking, and socioeconomic indicators. Regular monitoring would help ensure treatment compliance and track any attrition.
+
+This experimental design addresses several methodological challenges inherent in studying network effects. Village-level randomization helps contain spillovers within treatment units, while baseline stratification improves precision. Multiple methods of measuring network connections would help ensure reliable data collection. The primary challenge would be maintaining clear separation between treatment and control villages, but the cluster-randomized design helps mitigate this concern. This approach would provide cleaner identification of the causal effect of network degree on loan uptake compared to observational studies, though careful attention to implementation details would be crucial for success.

@@ -1,0 +1,386 @@
+---
+title: "MP03: COVID-19 Death Prediction Analysis"
+author: "Kohan Chen"
+format:
+    pdf
+---
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from openpyxl import load_workbook
+
+```
+
+# Q1:
+
+Filter the dataset to include only the Opportunity Insights and PM COVID variables listed in the Variable Description spreadsheet, along with county, state, and deathspc.
+
+```{python}
+df = pd.read_csv('Data-Covid003.csv', encoding='latin1')
+var_desc = pd.read_excel('PPHA_30545_MP03-Variable_Description.xlsx')
+
+selected_vars = var_desc[var_desc['Source'].isin(['Opportunity Insights', 'PM COVID'])]['Variable'].tolist()
+
+required_vars = ['county', 'state', 'deathspc']
+keep_vars = selected_vars + required_vars
+
+df_filtered = df[keep_vars]
+
+print("Data Filtering Summary:")
+print("-" * 25)
+print(f"Original dataset shape: {df.shape}")
+print(f"Filtered dataset shape: {df_filtered.shape}")
+```
+
+# Q2: 
+
+Compute and report descriptive (summary) statistics for deathspc and the subset of Opportunity Insights and PM COVID variables filtered in previous question.
+
+```{python}
+# 1. Summary statistics for deathspc
+print("Summary Statistics for Deaths per Capita:")
+print("-" * 25)
+print(df_filtered[['deathspc']].describe().round(4))
+
+# 2. Summary statistics for Opportunity Insights and PM COVID variables
+other_vars = [var for var in df_filtered.columns 
+              if var in selected_vars and 
+              df_filtered[var].dtype in ['int64', 'float64']]
+
+print("\nSummary Statistics for Opportunity Insights and PM COVID variables:")
+print("-" * 25)
+print(df_filtered[other_vars].describe().round(4))
+```
+
+# Q3:
+
+Drop all observations (rows) with missing values to prepare the dataset for modeling.
+
+```{python}
+# Count missing values before dropping
+missing_before = df_filtered.isnull().sum()
+n_rows_before = len(df_filtered)
+
+# Drop rows with any missing values
+df_filtered = df_filtered.dropna()
+
+# Count remaining rows
+n_rows_after = len(df_filtered)
+
+print("Missing Values Treatment Summary:")
+print("-" * 25)
+print(f"\nBefore dropping missing values:")
+print(f"- Number of rows: {n_rows_before}")
+print("\nVariables with missing values:")
+print(missing_before[missing_before > 0])
+
+print(f"\nAfter dropping missing values:")
+print(f"- Number of rows: {n_rows_after}")
+print(f"- Rows removed: {n_rows_before - n_rows_after}")
+print(f"- Percentage of data retained: {(n_rows_after/n_rows_before*100):.2f}%")
+```
+
+# Q4:
+
+Create dummy variables for each state and DC in the dataset.
+
+```{python}
+state_dummies = pd.get_dummies(df_filtered['state'], prefix='state')
+
+df_filtered = pd.concat([df_filtered, state_dummies], axis=1)
+
+# Count number of state dummies created
+n_states = len(state_dummies.columns)
+
+print("State Dummy Variables Summary:")
+print("-" * 25)
+print(f"Number of state dummy variables created: {n_states}")
+print("\nList of states with dummy variables:")
+for state in sorted(state_dummies.columns):
+    print(f"- {state}")
+```
+
+# Q5:
+
+Split the sample into training (80%) and test (20%) sets using random_state=11.
+
+```{python}
+from sklearn.model_selection import train_test_split
+
+# Split the data
+X = df_filtered.drop(['county', 'state', 'deathspc'], axis=1)  # Features
+y = df_filtered['deathspc']  # Target variable
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=11
+)
+
+print("Data Split Summary:")
+print("-" * 25)
+print(f"Total number of observations: {len(df_filtered)}")
+print(f"Training set size: {len(X_train)} ({len(X_train)/len(df_filtered)*100:.1f}%)")
+print(f"Test set size: {len(X_test)} ({len(X_test)/len(df_filtered)*100:.1f}%)")
+```
+
+# Q6:
+
+Fit OLS model using training data and evaluate performance.
+
+```{python}
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+y_train_pred = model.predict(X_train)
+y_test_pred = model.predict(X_test)
+
+train_mse = mean_squared_error(y_train, y_train_pred)
+test_mse = mean_squared_error(y_test, y_test_pred)
+
+print("Model Performance Summary:")
+print("-" * 25)
+print(f"Training set MSE: {train_mse:.6f}")
+print(f"Test set MSE: {test_mse:.6f}")
+print(f"MSE Ratio (Test/Train): {test_mse/train_mse:.2f}")
+
+# Calculate number of features
+n_features = X_train.shape[1]
+n_samples = X_train.shape[0]
+
+print(f"\nModel Complexity:")
+print("-" * 25)
+print(f"Number of features: {n_features}")
+print(f"Number of training samples: {n_samples}")
+print(f"Ratio of samples to features: {n_samples/n_features:.1f}")
+```
+
+## (b) 
+
+There are two main reasons to be concerned about overfitting in this context:
+
+1. **High Model Complexity**: 
+   - The model includes 100 features (predictors), which is relatively large
+   - Complex models with many features can learn noise in the training data
+
+2. **Evidence from Performance Metrics**:
+   - Training MSE (1.29) is notably lower than Test MSE (1.82)
+   - The Test/Train MSE ratio of 1.41 indicates the model performs 41% worse on unseen data
+   - This gap between training and test performance is clear evidence of overfitting
+
+However, the overfitting appears moderate rather than severe because:
+   - The ratio of training samples to features is relatively high (23.3:1)
+   - The Test/Train MSE ratio (1.41) suggests moderate degradation in performance
+   - More severe overfitting would typically show larger performance gaps (ratios > 2)
+
+# Q7:
+
+## (a)
+
+Calculate ridge and lasso models for a grid of λ values from 0.01 to 100.
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge, Lasso
+import numpy as np
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+
+lambdas = np.logspace(-2, 2, 100)  # from 0.01 to 100
+
+ridge_models = []
+lasso_models = []
+
+for lambda_val in lambdas:
+    # Fit Ridge model
+    ridge = Ridge(alpha=lambda_val)
+    ridge.fit(X_train_scaled, y_train)
+    ridge_models.append(ridge)
+    
+    # Fit Lasso model
+    lasso = Lasso(alpha=lambda_val)
+    lasso.fit(X_train_scaled, y_train)
+    lasso_models.append(lasso)
+
+```
+
+## (b)
+
+Using 10-fold cross-validation to estimate test error for each λ value.
+
+```{python}
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error
+
+# Set up 10-fold CV
+kf = KFold(n_splits=10, shuffle=True, random_state=25)
+
+# Initialize arrays to store CV errors
+ridge_cv_errors = np.zeros((len(ridge_models), 10))
+lasso_cv_errors = np.zeros((len(lasso_models), 10))
+
+# For each model (corresponding to a lambda value)
+for i, (ridge_model, lasso_model) in enumerate(zip(ridge_models, lasso_models)):
+    # For each fold
+    for j, (train_idx, val_idx) in enumerate(kf.split(X_train_scaled)):
+        # Get validation fold
+        X_fold_val = X_train_scaled[val_idx]
+        y_fold_val = y_train.iloc[val_idx]
+        
+        # Use pre-fitted models to predict
+        ridge_pred = ridge_model.predict(X_fold_val)
+        lasso_pred = lasso_model.predict(X_fold_val)
+        
+        # Calculate MSE for this fold
+        ridge_cv_errors[i, j] = mean_squared_error(y_fold_val, ridge_pred)
+        lasso_cv_errors[i, j] = mean_squared_error(y_fold_val, lasso_pred)
+
+# Calculate mean CV error for each lambda
+ridge_mean_cv_errors = ridge_cv_errors.mean(axis=1)
+lasso_mean_cv_errors = lasso_cv_errors.mean(axis=1)
+```
+
+## (c)
+
+Plot results.
+
+```{python}
+# Plot results
+plt.figure(figsize=(12, 5))
+
+# Ridge plot
+plt.subplot(1, 2, 1)
+plt.semilogx(lambdas, ridge_mean_cv_errors)
+plt.xlabel('λ')
+plt.ylabel('10-fold CV Mean Squared Error')
+plt.title('Ridge Regression')
+
+# Lasso plot
+plt.subplot(1, 2, 2)
+plt.semilogx(lambdas, lasso_mean_cv_errors)
+plt.xlabel('λ')
+plt.ylabel('10-fold CV Mean Squared Error')
+plt.title('Lasso Regression')
+
+plt.tight_layout()
+plt.show()
+```
+
+## (d)
+
+Find optimal λ values for Ridge and Lasso regression and interpret CV error plots.
+
+```{python}
+# Find optimal lambda (minimum CV error)
+ridge_optimal_idx = np.argmin(ridge_mean_cv_errors)
+lasso_optimal_idx = np.argmin(lasso_mean_cv_errors)
+
+ridge_optimal_lambda = lambdas[ridge_optimal_idx]
+lasso_optimal_lambda = lambdas[lasso_optimal_idx]
+
+print("Optimal λ Values:")
+print("-" * 25)
+print(f"Ridge optimal λ: {ridge_optimal_lambda:.4f}")
+print(f"Ridge minimum CV MSE: {ridge_mean_cv_errors[ridge_optimal_idx]:.4f}")
+print(f"\nLasso optimal λ: {lasso_optimal_lambda:.4f}")
+print(f"Lasso minimum CV MSE: {lasso_mean_cv_errors[lasso_optimal_idx]:.4f}")
+```
+
+### Interpretation of CV Error Plots:
+
+1. **Ridge Regression**:
+   - The CV error remains relatively stable for small to moderate λ values (0.01 to 10)
+   - Shows a sharp increase in error for λ > 10
+   - Optimal λ is in the lower range, suggesting that moderate regularization is sufficient
+   - The flat region indicates Ridge regression is relatively robust to the choice of λ
+
+2. **Lasso Regression**:
+   - CV error increases more rapidly with λ compared to Ridge
+   - Shows steeper increase in error as λ grows
+   - Optimal λ is in the lower range, indicating that strong regularization may be too restrictive
+   - More sensitive to the choice of λ than Ridge regression
+
+## (e)
+
+Train final models using optimal λ values on full training set.
+
+```{python}
+# Train final models with optimal lambda values
+final_ridge = Ridge(alpha=ridge_optimal_lambda)
+final_ridge.fit(X_train_scaled, y_train)
+
+final_lasso = Lasso(alpha=lasso_optimal_lambda)
+final_lasso.fit(X_train_scaled, y_train)
+
+# Calculate training and test errors for both models
+ridge_train_pred = final_ridge.predict(X_train_scaled)
+ridge_test_pred = final_ridge.predict(scaler.transform(X_test))
+
+lasso_train_pred = final_lasso.predict(X_train_scaled)
+lasso_test_pred = final_lasso.predict(scaler.transform(X_test))
+
+print("Final Model Performance:")
+print("-" * 25)
+print("Ridge Regression:")
+print(f"Training MSE: {mean_squared_error(y_train, ridge_train_pred):.4f}")
+print(f"Test MSE: {mean_squared_error(y_test, ridge_test_pred):.4f}")
+
+print("\nLasso Regression:")
+print(f"Training MSE: {mean_squared_error(y_train, lasso_train_pred):.4f}")
+print(f"Test MSE: {mean_squared_error(y_test, lasso_test_pred):.4f}")
+```
+
+# Q8:
+
+Compare model performances and make recommendation.
+
+```{python}
+# Collect all model performances
+print("Model Performance Comparison:")
+print("-" * 25)
+
+print("OLS Model:")
+print(f"Training MSE: {train_mse:.4f}")
+print(f"Test MSE: {test_mse:.4f}")
+print(f"Test/Train MSE Ratio: {test_mse/train_mse:.2f}")
+
+print("\nRidge Regression:")
+ridge_train_mse = mean_squared_error(y_train, ridge_train_pred)
+ridge_test_mse = mean_squared_error(y_test, ridge_test_pred)
+print(f"Training MSE: {ridge_train_mse:.4f}")
+print(f"Test MSE: {ridge_test_mse:.4f}")
+print(f"Test/Train MSE Ratio: {ridge_test_mse/ridge_train_mse:.2f}")
+
+print("\nLasso Regression:")
+lasso_train_mse = mean_squared_error(y_train, lasso_train_pred)
+lasso_test_mse = mean_squared_error(y_test, lasso_test_pred)
+print(f"Training MSE: {lasso_train_mse:.4f}")
+print(f"Test MSE: {lasso_test_mse:.4f}")
+print(f"Test/Train MSE Ratio: {lasso_test_mse/lasso_train_mse:.2f}")
+```
+
+### Model Comparison and Recommendation:
+
+1. **Performance Comparison**:
+   - OLS: Training MSE = 1.2915, Test MSE = 1.8238 (Ratio: 1.41)
+   - Ridge: Training MSE = 1.2915, Test MSE = 1.8238 (Ratio: 1.41)
+   - Lasso: Training MSE = 1.3122, Test MSE = 1.8033 (Ratio: 1.37)
+
+2. **Improvement Analysis**:
+   - Ridge regression performed identically to OLS (same MSE values)
+   - Lasso showed slightly better test performance (Test MSE: 1.8033 vs 1.8238)
+   - Lasso has a slightly better Test/Train ratio (1.37 vs 1.41), suggesting less overfitting
+
+3. **Recommendation to CDC**:
+   I would recommend the Lasso model because:
+   - It achieves the lowest test MSE (1.8033), indicating better generalization
+   - It shows less overfitting than both OLS and Ridge (lower Test/Train ratio), and more stable predictions on unseen data compared to OLS and Ridge
+   - It performs feature selection, which can help identify the most important predictors for COVID-19 deaths
+   - The simpler model (due to feature selection) would be more interpretable and practical for the CDC's vaccine distribution planning
+
+

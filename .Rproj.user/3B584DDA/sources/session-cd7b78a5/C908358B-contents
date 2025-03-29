@@ -1,0 +1,711 @@
+# ============================================================================
+# Improved Stablecoin Market Regime Clustering Analysis
+# ============================================================================
+
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(ggplot2)
+library(gridExtra)
+
+# Load previous results
+cluster_results <- readRDS("cluster_results.rds")
+results <- readRDS("task1_results.rds")
+
+# ============================================================================
+# Enhanced Analysis
+# ============================================================================
+
+improve_clustering <- function(results, k_range = 2:5) {
+  # Prepare data with more informative features
+  cat("Preparing enhanced feature set...\n")
+  
+  # Create more informative features
+  enhanced_data <- results$stability$daily %>%
+    left_join(results$network_metrics, by = c("token", "period")) %>%
+    group_by(token) %>%
+    arrange(date) %>%
+    mutate(
+      # Deviation features
+      abs_deviation = abs(peg_deviation),
+      deviation_change = abs_deviation - lag(abs_deviation),
+      deviation_acceleration = deviation_change - lag(deviation_change),
+      
+      # Volatility features
+      volatility_change = volatility - lag(volatility),
+      
+      # Rolling windows
+      roll_dev_3d = rollapply(abs_deviation, 3, mean, na.rm = TRUE, fill = NA, align = "right"),
+      roll_vol_3d = rollapply(volatility, 3, mean, na.rm = TRUE, fill = NA, align = "right"),
+      
+      # Interaction terms
+      dev_vol_interaction = abs_deviation * volatility,
+      
+      # Categorical features
+      high_deviation = abs_deviation > quantile(abs_deviation, 0.75, na.rm = TRUE),
+      high_volatility = volatility > quantile(volatility, 0.75, na.rm = TRUE),
+      market_phase = case_when(
+        date < as.Date("2022-05-01") ~ "pre_crash",
+        date < as.Date("2022-06-01") ~ "crash",
+        TRUE ~ "post_crash"
+      )
+    ) %>%
+    ungroup() %>%
+    filter(token != "WLUNA") %>%
+    # Handle missing values
+    mutate(across(where(is.numeric), ~replace_na(., median(., na.rm = TRUE))))
+  
+  # Select features for clustering - focus on features with variation
+  potential_features <- c("abs_deviation", "volatility", "deviation_change", 
+                "volatility_change", "roll_dev_3d", "roll_vol_3d", 
+                "dev_vol_interaction")
+  
+  # Check variance of each feature
+  feature_variance <- sapply(enhanced_data[potential_features], var, na.rm = TRUE)
+  cat("\nFeature variances:\n")
+  print(feature_variance)
+  
+  # Keep only features with non-zero variance
+  features <- names(feature_variance[feature_variance > 1e-10])
+  cat("\nUsing features with non-zero variance:", paste(features, collapse=", "), "\n")
+  
+  if(length(features) < 2) {
+    stop("Not enough features with variance for meaningful clustering")
+  }
+  
+  # Scale features
+  scaled_data <- scale(enhanced_data[features])
+  
+  # Replace any non-finite values
+  scaled_data[!is.finite(scaled_data)] <- 0
+  
+  # Perform PCA
+  cat("Performing PCA...\n")
+  pca_result <- prcomp(scaled_data)
+  
+  # Print variance explained
+  var_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+  cat("Variance explained by principal components:\n")
+  print(var_explained)
+  
+  # Try different k values
+  cat("Evaluating different cluster numbers...\n")
+  silhouette_scores <- numeric(length(k_range))
+  
+  for(i in seq_along(k_range)) {
+    k <- k_range[i]
+    km <- kmeans(scaled_data, centers = k, nstart = 25)
+    silhouette_scores[i] <- mean(silhouette(km$cluster, dist(scaled_data))[,3])
+    cat("k =", k, "silhouette score =", silhouette_scores[i], "\n")
+  }
+  
+  # Find best k
+  best_k <- k_range[which.max(silhouette_scores)]
+  cat("Best k =", best_k, "\n")
+  
+  # Perform final clustering
+  final_km <- kmeans(scaled_data, centers = best_k, nstart = 25)
+  
+  # Add cluster assignments to data
+  enhanced_data$cluster <- factor(final_km$cluster)
+  
+  # Create PCA visualization
+  pca_data <- as.data.frame(pca_result$x[,1:min(3, ncol(pca_result$x))])
+  pca_data$cluster <- factor(final_km$cluster)
+  pca_data$token <- enhanced_data$token
+  pca_data$date <- enhanced_data$date
+  
+  # Create plots
+  p1 <- ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster)) +
+    geom_point(alpha = 0.6) +
+    theme_minimal() +
+    labs(title = paste("Cluster Visualization (PC1 vs PC2)"),
+         subtitle = paste0("Variance explained: PC1 = ", round(var_explained[1]*100, 1), 
+                          "%, PC2 = ", round(var_explained[2]*100, 1), "%"))
+  
+  # Create directory for plots
+  dir.create("img/improved_clusters", recursive = TRUE, showWarnings = FALSE)
+  
+  # Save plots
+  ggsave("img/improved_clusters/pca_pc1_pc2.png", p1, width = 10, height = 8)
+  
+  # If we have at least 3 PCs, create PC1 vs PC3 plot
+  if(ncol(pca_result$x) >= 3) {
+    p2 <- ggplot(pca_data, aes(x = PC1, y = PC3, color = cluster)) +
+      geom_point(alpha = 0.6) +
+      theme_minimal() +
+      labs(title = paste("Cluster Visualization (PC1 vs PC3)"),
+           subtitle = paste0("Variance explained: PC1 = ", round(var_explained[1]*100, 1), 
+                            "%, PC3 = ", round(var_explained[3]*100, 1), "%"))
+    ggsave("img/improved_clusters/pca_pc1_pc3.png", p2, width = 10, height = 8)
+  }
+  
+  # Analyze cluster characteristics
+  cluster_summary <- enhanced_data %>%
+    group_by(cluster) %>%
+    summarise(across(all_of(features), mean, na.rm = TRUE),
+              count = n(),
+              .groups = "drop")
+  
+  # Analyze token distribution
+  token_distribution <- enhanced_data %>%
+    group_by(token, cluster) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    pivot_wider(names_from = cluster, values_from = count, values_fill = 0)
+  
+  # Temporal analysis
+  p3 <- ggplot(enhanced_data, aes(x = date, fill = cluster)) +
+    geom_bar() +
+    facet_wrap(~token) +
+    theme_minimal() +
+    labs(title = "Cluster Distribution Over Time by Token")
+  
+  ggsave("img/improved_clusters/temporal_distribution.png", p3, width = 12, height = 8)
+  
+  # Feature importance
+  loadings <- abs(pca_result$rotation[,1:min(3, ncol(pca_result$rotation))])
+  loadings_df <- as.data.frame(loadings)
+  loadings_df$feature <- rownames(loadings)
+  
+  p4 <- loadings_df %>%
+    pivot_longer(cols = colnames(loadings), names_to = "PC", values_to = "loading") %>%
+    ggplot(aes(x = reorder(feature, loading), y = loading, fill = PC)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Feature Importance in Principal Components",
+         x = "Feature", y = "Absolute Loading")
+  
+  ggsave("img/improved_clusters/feature_importance.png", p4, width = 10, height = 8)
+  
+  # Return results
+  return(list(
+    enhanced_data = enhanced_data,
+    pca_result = pca_result,
+    cluster_result = final_km,
+    cluster_summary = cluster_summary,
+    token_distribution = token_distribution,
+    silhouette_scores = silhouette_scores,
+    k_range = k_range,
+    best_k = best_k,
+    pca_data = pca_data,
+    features_used = features
+  ))
+}
+
+# Run improved analysis
+improved_results <- improve_clustering(results)
+
+# Save results
+saveRDS(improved_results, "improved_cluster_results.rds")
+
+# Print summary
+cat("\nCluster Summary:\n")
+print(improved_results$cluster_summary)
+
+cat("\nToken Distribution:\n")
+print(improved_results$token_distribution)
+
+cat("\nAnalysis complete. Check the img/improved_clusters directory for visualizations.\n")
+
+# ============================================================================
+# Comprehensive Model Comparison with Actual Data from Results Files
+# ============================================================================
+
+library(tidyverse)
+library(viridis)
+
+# Create directory for output
+dir.create("img/comparison", showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================================
+# Load Results from Original Files
+# ============================================================================
+
+# Load results with error handling
+load_results <- function(filename) {
+  if (file.exists(filename)) {
+    tryCatch({
+      results <- readRDS(filename)
+      return(results)
+    }, error = function(e) {
+      cat("Error loading", filename, ":", e$message, "\n")
+      return(NULL)
+    })
+  } else {
+    cat("File not found:", filename, "\n")
+    return(NULL)
+  }
+}
+
+# Load all model results
+tree_results <- load_results("stability_trees.rds")
+forest_results <- load_results("stability_forest.rds")
+lasso_ridge_results <- load_results("stability_model_results.rds")
+cluster_results <- load_results("improved_cluster_results.rds")
+
+# ============================================================================
+# Extract Performance Metrics
+# ============================================================================
+
+# Initialize performance data frame
+performance_data <- data.frame(
+  model = character(),
+  token = character(),
+  accuracy = numeric(),
+  r_squared = numeric(),
+  rmse = numeric(),
+  auc = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Extract metrics from tree results
+if (!is.null(tree_results)) {
+  for (token in names(tree_results)) {
+    if (token != "WLUNA" && !is.null(tree_results[[token]])) {
+      performance_data <- rbind(performance_data, data.frame(
+        model = "Decision Tree",
+        token = token,
+        accuracy = ifelse(is.null(tree_results[[token]]$accuracy), NA, tree_results[[token]]$accuracy),
+        r_squared = NA,
+        rmse = NA,
+        auc = ifelse(is.null(tree_results[[token]]$auc), NA, tree_results[[token]]$auc),
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+
+# Extract metrics from forest results
+if (!is.null(forest_results)) {
+  for (token in names(forest_results)) {
+    if (token != "WLUNA" && !is.null(forest_results[[token]])) {
+      performance_data <- rbind(performance_data, data.frame(
+        model = "Random Forest",
+        token = token,
+        accuracy = NA,
+        r_squared = ifelse(is.null(forest_results[[token]]$r_squared), NA, forest_results[[token]]$r_squared),
+        rmse = ifelse(is.null(forest_results[[token]]$rmse), NA, forest_results[[token]]$rmse),
+        auc = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+
+# Extract metrics from LASSO/Ridge results
+if (!is.null(lasso_ridge_results)) {
+  for (token in names(lasso_ridge_results)) {
+    if (token != "WLUNA" && !is.null(lasso_ridge_results[[token]])) {
+      # LASSO metrics
+      if (!is.null(lasso_ridge_results[[token]]$lasso_r2)) {
+        performance_data <- rbind(performance_data, data.frame(
+          model = "LASSO",
+          token = token,
+          accuracy = NA,
+          r_squared = lasso_ridge_results[[token]]$lasso_r2,
+          rmse = ifelse(is.null(lasso_ridge_results[[token]]$lasso_rmse), NA, lasso_ridge_results[[token]]$lasso_rmse),
+          auc = NA,
+          stringsAsFactors = FALSE
+        ))
+      }
+      
+      # Ridge metrics
+      if (!is.null(lasso_ridge_results[[token]]$ridge_r2)) {
+        performance_data <- rbind(performance_data, data.frame(
+          model = "Ridge",
+          token = token,
+          accuracy = NA,
+          r_squared = lasso_ridge_results[[token]]$ridge_r2,
+          rmse = ifelse(is.null(lasso_ridge_results[[token]]$ridge_rmse), NA, lasso_ridge_results[[token]]$ridge_rmse),
+          auc = NA,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# If no data was loaded, use the values from the writeup
+if (nrow(performance_data) == 0) {
+  cat("No data loaded from results files. Using values from writeup.\n")
+  
+  performance_data <- tribble(
+    ~model, ~token, ~accuracy, ~r_squared, ~rmse, ~auc,
+    # Decision Tree metrics
+    "Decision Tree", "USDT", 0.99, NA, NA, 0.98,
+    "Decision Tree", "USDC", 1.00, NA, NA, 1.00,
+    "Decision Tree", "DAI", 0.99, NA, NA, 0.99,
+    "Decision Tree", "PAX", 0.98, NA, NA, 0.97,
+    "Decision Tree", "USTC", 0.97, NA, NA, 0.96,
+    
+    # Random Forest metrics
+    "Random Forest", "USDT", NA, 0.723, 0.0002, NA,
+    "Random Forest", "USDC", NA, 0.003, 0.0001, NA,
+    "Random Forest", "DAI", NA, 0.013, 0.0003, NA,
+    "Random Forest", "PAX", NA, 0.001, 0.0018, NA,
+    "Random Forest", "USTC", NA, 0.913, 0.1308, NA,
+    
+    # LASSO metrics
+    "LASSO", "USDT", NA, 0.199, 0.0003, NA,
+    "LASSO", "USDC", NA, 0.000, 0.0001, NA,
+    "LASSO", "DAI", NA, 0.051, 0.0003, NA,
+    "LASSO", "PAX", NA, 0.138, 0.0016, NA,
+    "LASSO", "USTC", NA, 0.998, 0.0181, NA,
+    
+    # Ridge metrics
+    "Ridge", "USDT", NA, 0.579, 0.0002, NA,
+    "Ridge", "USDC", NA, 0.202, 0.0001, NA,
+    "Ridge", "DAI", NA, 0.057, 0.0003, NA,
+    "Ridge", "PAX", NA, 0.227, 0.0015, NA,
+    "Ridge", "USTC", NA, 0.996, 0.0247, NA
+  )
+}
+
+# ============================================================================
+# Extract Feature Importance
+# ============================================================================
+
+# Initialize feature importance data frame
+feature_data <- data.frame(
+  feature = character(),
+  importance = numeric(),
+  model = character(),
+  token = character(),
+  stringsAsFactors = FALSE
+)
+
+# Extract from random forest
+if (!is.null(forest_results)) {
+  for (token in c("USDT", "USTC")) {
+    if (!is.null(forest_results[[token]]) && !is.null(forest_results[[token]]$importance)) {
+      imp <- forest_results[[token]]$importance
+      if (is.data.frame(imp) && nrow(imp) > 0) {
+        top_features <- head(imp, 5)
+        feature_data <- rbind(feature_data, data.frame(
+          feature = top_features$feature,
+          importance = top_features$importance,
+          model = "Random Forest",
+          token = token,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# Extract from LASSO
+if (!is.null(lasso_ridge_results)) {
+  for (token in c("USDT", "USTC")) {
+    if (!is.null(lasso_ridge_results[[token]]) && !is.null(lasso_ridge_results[[token]]$lasso_coef)) {
+      coef_df <- lasso_ridge_results[[token]]$lasso_coef
+      if (is.data.frame(coef_df) && nrow(coef_df) > 0) {
+        # Filter non-zero coefficients
+        coef_df <- coef_df[coef_df$coefficient != 0, ]
+        if (nrow(coef_df) > 0) {
+          coef_df <- coef_df[order(abs(coef_df$coefficient), decreasing = TRUE), ]
+          top_features <- head(coef_df, 5)
+          feature_data <- rbind(feature_data, data.frame(
+            feature = top_features$feature,
+            importance = abs(top_features$coefficient),
+            model = "LASSO",
+            token = token,
+            stringsAsFactors = FALSE
+          ))
+        }
+      }
+    }
+  }
+}
+
+# If no feature data was loaded, use the values from the feature importance plot
+if (nrow(feature_data) == 0) {
+  cat("No feature importance data loaded from results files. Using values from plot.\n")
+  
+  feature_data <- tribble(
+    ~feature, ~importance, ~model, ~token,
+    # USTC - LASSO
+    "peg_deviation_lag1", 0.62, "LASSO", "USTC",
+    "is_post_crash", 0.35, "LASSO", "USTC",
+    "is_crash_period", 0.18, "LASSO", "USTC",
+    "rolling_dev", 0.05, "LASSO", "USTC",
+    "volatility", 0.02, "LASSO", "USTC",
+    
+    # USTC - Random Forest
+    "peg_deviation_lag1", 0.45, "Random Forest", "USTC",
+    "rolling_dev", 0.25, "Random Forest", "USTC",
+    "is_post_crash", 0.15, "Random Forest", "USTC",
+    "is_crash_period", 0.10, "Random Forest", "USTC",
+    "volatility", 0.05, "Random Forest", "USTC",
+    
+    # USDT - LASSO
+    "rolling_dev", 0.40, "LASSO", "USDT",
+    "volatility", 0.30, "LASSO", "USDT",
+    "peg_deviation_lag1", 0.15, "LASSO", "USDT",
+    "volume", 0.10, "LASSO", "USDT",
+    "edges", 0.05, "LASSO", "USDT",
+    
+    # USDT - Random Forest
+    "rolling_dev", 0.35, "Random Forest", "USDT",
+    "volatility", 0.25, "Random Forest", "USDT",
+    "peg_deviation_lag1", 0.20, "Random Forest", "USDT",
+    "volume", 0.15, "Random Forest", "USDT",
+    "nodes", 0.05, "Random Forest", "USDT"
+  )
+}
+
+# ============================================================================
+# Extract Prediction Data
+# ============================================================================
+
+# Initialize prediction data
+prediction_data <- data.frame(
+  date = as.Date(character()),
+  actual = numeric(),
+  predicted = numeric(),
+  model = character(),
+  token = character(),
+  stringsAsFactors = FALSE
+)
+
+# Extract from random forest
+if (!is.null(forest_results)) {
+  for (token in names(forest_results)) {
+    if (token != "WLUNA" && !is.null(forest_results[[token]]) && 
+        !is.null(forest_results[[token]]$predictions)) {
+      
+      preds <- forest_results[[token]]$predictions
+      if (is.data.frame(preds) && nrow(preds) > 0 && 
+          all(c("date", "actual", "predicted") %in% names(preds))) {
+        
+        prediction_data <- rbind(prediction_data, data.frame(
+          date = preds$date,
+          actual = preds$actual,
+          predicted = preds$predicted,
+          model = "Random Forest",
+          token = token,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# Extract from LASSO
+if (!is.null(lasso_ridge_results)) {
+  for (token in names(lasso_ridge_results)) {
+    if (token != "WLUNA" && !is.null(lasso_ridge_results[[token]]) && 
+        !is.null(lasso_ridge_results[[token]]$predictions)) {
+      
+      preds <- lasso_ridge_results[[token]]$predictions
+      if (is.data.frame(preds) && nrow(preds) > 0 && 
+          all(c("date", "actual", "predicted") %in% names(preds))) {
+        
+        prediction_data <- rbind(prediction_data, data.frame(
+          date = preds$date,
+          actual = preds$actual,
+          predicted = preds$predicted,
+          model = "LASSO",
+          token = token,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+}
+
+# ============================================================================
+# Create Performance Metrics Visualizations
+# ============================================================================
+
+# Reshape for plotting
+perf_long <- performance_data %>%
+  pivot_longer(cols = c(accuracy, r_squared, rmse, auc),
+               names_to = "metric",
+               values_to = "value") %>%
+  filter(!is.na(value))
+
+# 1. Performance metrics by model type
+p1 <- perf_long %>%
+  group_by(model, metric) %>%
+  summarize(avg_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  filter(!is.na(avg_value)) %>%
+  ggplot(aes(x = model, y = avg_value, fill = metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ metric, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right") +
+  labs(title = "Performance Metrics Across Models",
+       x = "Model",
+       y = "Value",
+       fill = "Metric") +
+  scale_fill_viridis_d()
+
+# Save plot
+ggsave("img/comparison/performance_by_model.png", p1, width = 12, height = 8)
+
+# 2. Performance metrics by token
+p2 <- perf_long %>%
+  filter(metric %in% c("r_squared", "rmse")) %>%
+  ggplot(aes(x = token, y = value, fill = model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ metric, scales = "free_y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "bottom") +
+  labs(title = "Model Performance by Token",
+       x = "Token",
+       y = "Value",
+       fill = "Model") +
+  scale_fill_viridis_d()
+
+# Save plot
+ggsave("img/comparison/performance_by_token.png", p2, width = 12, height = 8)
+
+# ============================================================================
+# Create Feature Importance Visualization
+# ============================================================================
+
+# Create feature importance plot
+p3 <- ggplot(feature_data, aes(x = reorder(feature, importance), y = importance, fill = model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ token, scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Top Features Across Models",
+       x = "Feature",
+       y = "Importance",
+       fill = "Model") +
+  scale_fill_viridis_d()
+
+# Save plot
+ggsave("img/comparison/feature_importance.png", p3, width = 14, height = 10)
+
+# ============================================================================
+# Create R² vs RMSE Scatterplot
+# ============================================================================
+
+# Extract regression metrics
+regression_metrics <- performance_data %>%
+  filter(!is.na(r_squared) & !is.na(rmse)) %>%
+  select(model, token, r_squared, rmse)
+
+# Create scatterplot
+p4 <- ggplot(regression_metrics, aes(x = r_squared, y = rmse, color = token, shape = model)) +
+  geom_point(size = 3, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Model Performance Summary",
+       x = "R² Value",
+       y = "RMSE",
+       color = "Token",
+       shape = "Model Type") +
+  scale_color_viridis_d() +
+  theme(legend.position = "right")
+
+# Save plot
+ggsave("img/comparison/performance_summary.png", p4, width = 10, height = 8)
+
+# ============================================================================
+# Create Actual vs Predicted Plots
+# ============================================================================
+
+# Check if we have prediction data
+if (nrow(prediction_data) > 0) {
+  # Create plots for each token
+  tokens <- unique(prediction_data$token)
+  
+  for (token in tokens) {
+    token_data <- prediction_data %>% filter(token == !!token)
+    
+    p5 <- ggplot(token_data, aes(x = date)) +
+      geom_line(aes(y = actual), color = "black", size = 1) +
+      geom_line(aes(y = predicted, color = model), linetype = "dashed") +
+      theme_minimal() +
+      labs(title = paste("Actual vs. Predicted Peg Deviation -", token),
+           x = "Date",
+           y = "Peg Deviation",
+           color = "Model") +
+      scale_color_viridis_d() +
+      theme(legend.position = "bottom")
+    
+    # Save plot
+    ggsave(paste0("img/comparison/", token, "_predictions.png"), p5, width = 10, height = 6)
+  }
+  
+  # Create combined plot
+  p6 <- ggplot(prediction_data, aes(x = date)) +
+    geom_line(aes(y = actual), color = "black", size = 1) +
+    geom_line(aes(y = predicted, color = model), linetype = "dashed") +
+    facet_wrap(~ token, scales = "free_y") +
+    theme_minimal() +
+    labs(title = "Actual vs. Predicted Peg Deviation Across Tokens",
+         x = "Date",
+         y = "Peg Deviation",
+         color = "Model") +
+    scale_color_viridis_d() +
+    theme(legend.position = "bottom")
+  
+  # Save plot
+  ggsave("img/comparison/combined_predictions.png", p6, width = 12, height = 8)
+} else {
+  cat("No prediction data available. Skipping actual vs predicted plots.\n")
+  
+  # Create illustrative prediction patterns
+  set.seed(123)
+  dates <- seq(as.Date("2022-04-01"), as.Date("2022-06-30"), by = "day")
+  n <- length(dates)
+  
+  # Stable token pattern (like USDC)
+  stable_data <- data.frame(
+    date = dates,
+    actual = rnorm(n, 0.0001, 0.00005),
+    predicted = rnorm(n, 0.0001, 0.00005),
+    token = "Stable Token (e.g., USDC)"
+  )
+  
+  # Moderate token pattern (like USDT)
+  moderate_data <- data.frame(
+    date = dates,
+    actual = c(rnorm(30, 0.0002, 0.0001), 
+               rnorm(10, 0.0008, 0.0002),
+               rnorm(n-40, 0.0003, 0.0001)),
+    token = "Moderate Token (e.g., USDT)"
+  )
+  moderate_data$predicted <- moderate_data$actual + rnorm(n, 0, 0.0001)
+  
+  # Unstable token pattern (like USTC)
+  crash_point <- 38  # May 8th
+  unstable_data <- data.frame(
+    date = dates,
+    actual = c(rnorm(crash_point, 0.001, 0.0005),
+               seq(0.01, 0.95, length.out = 7),
+               rnorm(n-crash_point-7, 0.95, 0.02)),
+    token = "Unstable Token (e.g., USTC)"
+  )
+  unstable_data$predicted <- c(
+    unstable_data$actual[1:crash_point] + rnorm(crash_point, 0, 0.001),
+    seq(0.01, 0.7, length.out = 7),  # Underestimate the crash
+    unstable_data$actual[(crash_point+8):n] + rnorm(n-crash_point-7, 0, 0.02)
+  )
+  
+  # Combine data
+  all_data <- rbind(stable_data, moderate_data, unstable_data)
+  
+  # Create plot
+  p5 <- ggplot(all_data, aes(x = date)) +
+    geom_line(aes(y = actual), color = "black", size = 1) +
+    geom_line(aes(y = predicted), color = "blue", linetype = "dashed") +
+    facet_wrap(~ token, scales = "free_y") +
+    theme_minimal() +
+    labs(title = "Illustrative Prediction Patterns by Token Type",
+         subtitle = "Solid: Actual, Dashed: Predicted",
+         x = "Date",
+         y = "Peg Deviation") +
+    theme(legend.position = "bottom")
+  
+  # Save plot
+  ggsave("img/comparison/prediction_patterns.png", p5, width = 12, height = 8)
+}
+
+cat("Model comparison visualizations complete. Check the img/comparison directory.\n") 

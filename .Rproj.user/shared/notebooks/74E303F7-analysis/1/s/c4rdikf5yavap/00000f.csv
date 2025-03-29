@@ -1,0 +1,6 @@
+"0","# Network changes during the crash"
+"0","network_changes <- results$network_metrics %>%"
+"0","  filter(token == ""UST"") %>%"
+"0","  select(period, nodes, edges, density, reciprocity, communities, modularity)"
+"0",""
+"0","print(network_changes)"

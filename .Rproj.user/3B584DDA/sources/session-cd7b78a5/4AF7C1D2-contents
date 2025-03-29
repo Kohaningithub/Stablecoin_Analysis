@@ -1,0 +1,273 @@
+# ============================================================================
+# LASSO/Ridge Regression Analysis for Stablecoin Stability
+# ============================================================================
+
+library(glmnet)
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(zoo)
+
+# Function to prepare data for regularized regression
+prepare_regression_data <- function(stability_data, sentiment_data = NULL, 
+                                  network_metrics = NULL) {
+  # Start with stability metrics
+  model_data <- stability_data %>%
+    group_by(token) %>%
+    arrange(date) %>%
+    mutate(
+      # Create lagged variables
+      peg_deviation_lag1 = lag(peg_deviation, 1),
+      peg_deviation_lag2 = lag(peg_deviation, 2),
+      peg_deviation_lag3 = lag(peg_deviation, 3),
+      
+      # Rolling statistics
+      volatility_7d = rollapply(peg_deviation, width = 7, 
+                               FUN = function(x) sd(x, na.rm = TRUE), 
+                               fill = NA, align = "right"),
+      rolling_mean_7d = rollapply(peg_deviation, width = 7, 
+                                 FUN = function(x) mean(x, na.rm = TRUE), 
+                                 fill = NA, align = "right"),
+      
+      # Period indicators
+      is_crash_period = date >= as.Date("2022-05-08") & 
+                       date <= as.Date("2022-05-15"),
+      is_post_crash = date > as.Date("2022-05-15"),
+      
+      # Day of week features
+      is_weekend = weekdays(date) %in% c("Saturday", "Sunday"),
+      
+      # Log transform volume (handling zeros)
+      log_volume = log1p(volume)
+    ) %>%
+    ungroup()
+  
+  # Add sentiment features if available
+  if (!is.null(sentiment_data)) {
+    # Check if sentiment data has token column
+    if ("token" %in% names(sentiment_data)) {
+      model_data <- model_data %>%
+        left_join(sentiment_data %>% 
+                  select(date, token, avg_sentiment, sentiment_volume),
+                by = c("date", "token"))
+    } else {
+      # Assume sentiment data is for USTC only
+      model_data <- model_data %>%
+        left_join(sentiment_data %>% 
+                  select(date, avg_sentiment, sentiment_volume),
+                by = "date") %>%
+        mutate(
+          # Only apply sentiment to USTC
+          avg_sentiment = ifelse(token == "USTC", avg_sentiment, 2),
+          sentiment_volume = ifelse(token == "USTC", sentiment_volume, 0)
+        )
+    }
+    
+    # Handle missing sentiment values and create indicators
+    model_data <- model_data %>%
+      mutate(
+        avg_sentiment = ifelse(is.na(avg_sentiment), 2, avg_sentiment),
+        sentiment_volume = ifelse(is.na(sentiment_volume), 0, sentiment_volume),
+        sentiment_negative = avg_sentiment < 2,
+        sentiment_positive = avg_sentiment > 2
+      )
+  }
+  
+  # Add network metrics if available
+  if (!is.null(network_metrics)) {
+    model_data <- model_data %>%
+      left_join(network_metrics, by = c("date", "token"))
+  }
+  
+  # Handle missing values
+  model_data <- model_data %>%
+    mutate(across(where(is.numeric), ~ifelse(is.infinite(.), NA, .))) %>%
+    mutate(across(where(is.numeric), ~ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+  
+  return(model_data)
+}
+
+# Function to run LASSO/Ridge regression for a specific token
+run_regularized_regression <- function(data, token_name, alpha = 1, 
+                                     train_end = "2022-05-07") {
+  # Filter for specific token
+  token_data <- data %>%
+    filter(token == token_name)
+  
+  # Split into training and testing
+  train_data <- token_data %>% 
+    filter(date <= as.Date(train_end))
+  test_data <- token_data %>% 
+    filter(date > as.Date(train_end))
+  
+  # Select features for model
+  feature_cols <- c("peg_deviation_lag1", "peg_deviation_lag2", "peg_deviation_lag3",
+                   "volatility_7d", "rolling_mean_7d", "is_weekend", "log_volume")
+  
+  # Add sentiment features if they exist
+  if ("avg_sentiment" %in% names(token_data)) {
+    feature_cols <- c(feature_cols, "avg_sentiment", "sentiment_volume",
+                     "sentiment_negative", "sentiment_positive")
+  }
+  
+  # Add network features if they exist
+  network_cols <- intersect(c("density", "centralization", "avg_degree"), 
+                          names(token_data))
+  if (length(network_cols) > 0) {
+    feature_cols <- c(feature_cols, network_cols)
+  }
+  
+  # Prepare model matrices
+  x_train <- as.matrix(train_data[, feature_cols])
+  y_train <- train_data$peg_deviation
+  x_test <- as.matrix(test_data[, feature_cols])
+  y_test <- test_data$peg_deviation
+  
+  # Set up cross-validation
+  cv_fit <- cv.glmnet(x_train, y_train, alpha = alpha, 
+                      nfolds = 5, standardize = TRUE)
+  
+  # Fit model with optimal lambda
+  final_model <- glmnet(x_train, y_train, alpha = alpha, 
+                       lambda = cv_fit$lambda.min, standardize = TRUE)
+  
+  # Make predictions
+  train_pred <- predict(final_model, x_train)
+  test_pred <- predict(final_model, x_test)
+  
+  # Calculate performance metrics
+  train_rmse <- sqrt(mean((y_train - train_pred)^2))
+  test_rmse <- sqrt(mean((y_test - test_pred)^2))
+  train_r2 <- 1 - sum((y_train - train_pred)^2) / sum((y_train - mean(y_train))^2)
+  test_r2 <- 1 - sum((y_test - test_pred)^2) / sum((y_test - mean(y_test))^2)
+  
+  # Get feature importance
+  coef_df <- data.frame(
+    feature = rownames(coef(final_model)),
+    coefficient = as.vector(coef(final_model))
+  ) %>%
+    filter(feature != "(Intercept)") %>%
+    arrange(desc(abs(coefficient)))
+  
+  # Return results
+  return(list(
+    model = final_model,
+    cv_fit = cv_fit,
+    feature_importance = coef_df,
+    metrics = list(
+      train_rmse = train_rmse,
+      test_rmse = test_rmse,
+      train_r2 = train_r2,
+      test_r2 = test_r2
+    ),
+    predictions = list(
+      train = data.frame(
+        date = train_data$date,
+        actual = y_train,
+        predicted = as.vector(train_pred)
+      ),
+      test = data.frame(
+        date = test_data$date,
+        actual = y_test,
+        predicted = as.vector(test_pred)
+      )
+    )
+  ))
+}
+
+# Function to visualize results
+plot_regularized_results <- function(model_results, token_name) {
+  # Combine train and test predictions
+  all_predictions <- bind_rows(
+    model_results$predictions$train %>% mutate(set = "Training"),
+    model_results$predictions$test %>% mutate(set = "Testing")
+  )
+  
+  # Create prediction plot
+  p1 <- ggplot(all_predictions, aes(x = date)) +
+    geom_line(aes(y = actual, color = "Actual"), size = 1) +
+    geom_line(aes(y = predicted, color = "Predicted"), size = 1, linetype = "dashed") +
+    geom_vline(xintercept = as.Date("2022-05-08"), linetype = "dashed") +
+    geom_vline(xintercept = as.Date("2022-05-15"), linetype = "dashed") +
+    facet_wrap(~set) +
+    scale_color_manual(values = c("Actual" = "#E41A1C", "Predicted" = "#4DAF4A")) +
+    labs(title = paste(token_name, "Peg Deviation - Actual vs Predicted"),
+         subtitle = paste("Train RMSE:", round(model_results$metrics$train_rmse, 4),
+                        "Test RMSE:", round(model_results$metrics$test_rmse, 4)),
+         x = "Date", y = "Peg Deviation",
+         color = "Type") +
+    theme_minimal()
+  
+  # Create feature importance plot
+  p2 <- ggplot(model_results$feature_importance %>% head(10),
+               aes(x = reorder(feature, abs(coefficient)), y = coefficient)) +
+    geom_col() +
+    coord_flip() +
+    labs(title = paste(token_name, "Feature Importance"),
+         x = "Feature", y = "Coefficient") +
+    theme_minimal()
+  
+  # Print plots
+  print(p1)
+  print(p2)
+  
+  # Save plots
+  ggsave(paste0("img/", tolower(token_name), "_lasso_predictions.png"), p1)
+  ggsave(paste0("img/", tolower(token_name), "_lasso_features.png"), p2)
+}
+
+# Main analysis function
+run_lasso_analysis <- function(stability_data, sentiment_data = NULL, 
+                             network_metrics = NULL) {
+  # Prepare data
+  model_data <- prepare_regression_data(stability_data, sentiment_data, network_metrics)
+  
+  # Run analysis for each token
+  results <- list()
+  for (token in unique(model_data$token)) {
+    cat("Running analysis for", token, "\n")
+    
+    # Try both LASSO and Ridge regression
+    lasso_results <- run_regularized_regression(model_data, token, alpha = 1)
+    ridge_results <- run_regularized_regression(model_data, token, alpha = 0)
+    
+    # Store results
+    results[[token]] <- list(
+      lasso = lasso_results,
+      ridge = ridge_results
+    )
+    
+    # Create visualizations
+    plot_regularized_results(lasso_results, token)
+  }
+  
+  return(results)
+}
+
+# Run the analysis if stability data exists
+if (exists("results") && !is.null(results$stability$daily)) {
+  # Get sentiment data if available
+  sentiment_data <- if(exists("daily_ust_sentiment")) daily_ust_sentiment else NULL
+  
+  # Run LASSO analysis
+  lasso_results <- run_lasso_analysis(
+    stability_data = results$stability$daily,
+    sentiment_data = sentiment_data,
+    network_metrics = results$network_metrics
+  )
+  
+  # Print summary of results
+  cat("\nLASSO/Ridge Regression Results Summary:\n")
+  for (token in names(lasso_results)) {
+    cat("\n", token, ":\n")
+    cat("LASSO - Test RMSE:", round(lasso_results[[token]]$lasso$metrics$test_rmse, 4),
+        "R²:", round(lasso_results[[token]]$lasso$metrics$test_r2, 4), "\n")
+    cat("Ridge - Test RMSE:", round(lasso_results[[token]]$ridge$metrics$test_rmse, 4),
+        "R²:", round(lasso_results[[token]]$ridge$metrics$test_r2, 4), "\n")
+    
+    cat("Top 5 predictors:\n")
+    print(head(lasso_results[[token]]$lasso$feature_importance, 5))
+  }
+} else {
+  cat("Stability data not available. Please run stability analysis first.\n")
+} 

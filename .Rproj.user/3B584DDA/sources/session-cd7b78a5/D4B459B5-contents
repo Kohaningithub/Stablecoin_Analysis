@@ -1,0 +1,273 @@
+---
+title: "Assignment 7"
+author: "Kohan Chen"
+date: "2025-03-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+fx <- read.csv("FXmonthly.csv")
+fx_returns <- (fx[2:120,] - fx[1:119,]) / (fx[1:119,])
+
+sp500 <- read.csv("sp500.csv")
+currency_codes <- read.table("currency_codes.txt", header=TRUE, stringsAsFactors=FALSE)
+
+```
+
+# Question 1
+```{r}
+# Calculate correlation matrix
+fx_cor <- cor(fx_returns, use="complete.obs")
+
+library(corrplot)
+corrplot(fx_cor, method="color", type="upper", tl.cex=0.7, 
+         title="Correlation Matrix of Currency Returns")
+
+cor_values <- fx_cor[upper.tri(fx_cor)]
+cat("Mean correlation:", mean(cor_values, na.rm=TRUE), "\n")
+cat("Median correlation:", median(cor_values, na.rm=TRUE), "\n")
+cat("Range of correlations:", range(cor_values, na.rm=TRUE), "\n")
+```
+This positive average correlation suggests currencies tend to move together. Wide range showing both strong positive and moderate negative relationships.
+
+This suggest the presence of a common underlying factor influencing currency movements. With the positive mean correlation, a factor model could be useful in explaining systematic variations in currency returns. 
+
+Since correlations vary widely, we need a multi-factor model to capture all return dynamics. A few has negative correlations, indicating the presence of idiosyncratic risk.
+
+# Question 2 
+Fit, plot, and interpret principal components.
+```{r}
+fx_pca <- prcomp(fx_returns, scale=TRUE)
+
+# Scree plot to visualize variance explained
+var_explained <- fx_pca$sdev^2 / sum(fx_pca$sdev^2)
+cumvar_explained <- cumsum(var_explained)
+
+par(mfrow=c(1,2))
+barplot(var_explained[1:10], main="Variance Explained by PCs", 
+        xlab="Principal Component", ylab="Proportion of Variance Explained")
+plot(cumvar_explained[1:10], type="b", main="Cumulative Variance Explained",
+     xlab="Number of Principal Components", ylab="Cumulative Proportion")
+
+# Examine loadings for the first few PCs
+loadings <- fx_pca$rotation[,1:3]
+round(loadings, 3)
+
+# Visualize loadings
+library(ggplot2)
+loadings_df <- data.frame(
+  Currency = rownames(loadings),
+  PC1 = loadings[,1],
+  PC2 = loadings[,2],
+  PC3 = loadings[,3]
+)
+
+ggplot(loadings_df, aes(x=PC1, y=PC2, label=Currency)) +
+  geom_point() +
+  geom_text(hjust=0, vjust=0) +
+  labs(title="Currency Loadings on PC1 and PC2") +
+  theme_minimal()
+
+# Plot PC scores over time - FIX THE DATE ERROR
+scores <- data.frame(fx_pca$x[,1:3])
+
+# Instead of trying to use dates from rownames, just use a sequence
+# This plots against time index rather than actual dates
+scores$TimeIndex <- 1:nrow(scores)
+
+ggplot(scores, aes(x=TimeIndex)) +
+  geom_line(aes(y=PC1, color="PC1")) +
+  geom_line(aes(y=PC2, color="PC2")) +
+  geom_line(aes(y=PC3, color="PC3")) +
+  labs(title="Principal Component Scores Over Time", 
+       x="Time (Month Index)",
+       y="Score") +
+  theme_minimal() +
+  scale_color_manual(values=c("PC1"="blue", "PC2"="red", "PC3"="green"),
+                    name="Components")
+```
+
+From the bar chart, we can see that the first principal component explains the most variance(40%), PC2 explains significantly less (around 10-15%), and the rest explain progressively smaller portions.
+
+From the Line chart, The first three to five components explain around 70-80% of total variance, meaning that a small number of factors can capture most of the FX movements.
+
+From the scatter plot, we can see that if a currency has a strong PC1 loading, it is heavily influenced by broad market trends.
+If a currency loads strongly on PC2, its movements are likely due to idiosyncratic regional factors.
+
+From the line chart, PC1 dominates fluctuations and captures broad market-wide risks. PC2 and PC3 likely capture regional or idiosyncratic effects. Some currencies are more independent, while others strongly follow broad market trends.
+
+# Question 3
+Regress SP500 returns onto currency movement factors, using both 'glm on first K' and lasso techniques.
+Use the results to add to your factor interpretation.
+```{r}
+# Prepare S&P 500 returns
+sp500_returns <- diff(as.numeric(sp500[,2]))/as.numeric(sp500[-nrow(sp500),2])
+
+# Ensure the lengths match
+min_length <- min(length(sp500_returns), nrow(fx_pca$x))
+sp500_returns <- sp500_returns[1:min_length]
+pc_scores <- fx_pca$x[1:min_length,]
+
+# Approach 1: GLM on first K principal components
+# Try different values of K
+k_values <- c(3, 5, 7, 10)
+
+# Just use k=3 for simplicity to avoid errors
+best_k <- 3
+cat("Using k =", best_k, "principal components\n")
+
+# Create the best GLM model explicitly
+best_formula <- as.formula(paste("sp500_returns ~", 
+                               paste0("pc_scores[,", 1:best_k, "]", collapse = " + ")))
+best_glm <- glm(best_formula)
+print(summary(best_glm))
+
+# Approach 2: Lasso regression on principal components
+library(glmnet)
+
+# Prepare data for glmnet
+x_matrix <- as.matrix(pc_scores[,1:15])  # Using first 15 PCs
+y_vector_pc <- sp500_returns
+
+# Handle missing values for PC analysis
+complete_cases_pc <- complete.cases(x_matrix, y_vector_pc)
+x_matrix <- x_matrix[complete_cases_pc,]
+y_vector_pc <- y_vector_pc[complete_cases_pc]
+
+# Perform cross-validation to find optimal lambda
+set.seed(123)
+cv_lasso <- cv.glmnet(x_matrix, y_vector_pc, alpha=1)
+plot(cv_lasso)
+
+# Fit lasso with optimal lambda
+lasso_model <- glmnet(x_matrix, y_vector_pc, alpha=1, lambda=cv_lasso$lambda.min)
+lasso_pred <- predict(lasso_model, x_matrix)
+
+# Print coefficients
+cat("Lasso coefficients:\n")
+print(coef(lasso_model))
+
+# Plot actual vs predicted values
+par(mfrow=c(1,2))
+plot(sp500_returns, predict(best_glm), 
+     main=paste("GLM with", best_k, "PCs"),
+     xlab="Actual S&P 500 Returns", ylab="Predicted Returns")
+abline(0, 1, col="red")
+
+plot(y_vector_pc, lasso_pred, 
+     main="Lasso on PCs",
+     xlab="Actual S&P 500 Returns", ylab="Predicted Returns")
+abline(0, 1, col="red")
+
+# Interpret the most significant components
+significant_pcs <- which(abs(coef(lasso_model)[-1]) > 0)
+cat("Significant principal components from Lasso:", significant_pcs, "\n")
+
+# Examine loadings of significant PCs to interpret factors
+if(length(significant_pcs) > 0) {
+  for(pc in significant_pcs) {
+    cat("PC", pc, "coefficient:", coef(lasso_model)[pc+1], "\n")
+    cat("Top 5 currencies with highest absolute loadings on PC", pc, ":\n")
+    pc_loadings <- fx_pca$rotation[,pc]
+    top_indices <- order(abs(pc_loadings), decreasing=TRUE)[1:5]
+    top_currencies <- pc_loadings[top_indices]
+    names(top_currencies) <- rownames(fx_pca$rotation)[top_indices]
+    print(top_currencies)
+    cat("\n")
+  }
+} else {
+  cat("No significant principal components found.\n")
+}
+```
+The Lasso model did not select any principal components, indicating that none of the components were significant predictors of S&P 500 returns in the data. This could be due to various factors, including market conditions, data quality, or the specific currencies included in the analysis.
+
+This could suggest that the relationship between the selected principal components and the S&P 500 returns is weak or that the principal components do not capture the relevant information needed to predict the returns effectively.
+
+The GLM with 3 principal components shows a wide spread of predicted returns, indicating that while the model can fit the data, it may not be capturing the underlying relationships effectively.
+
+The predicted values are clustered around a narrow range, which suggests that the model may be overfitting or that the principal components do not explain the variance in S&P 500 returns well.
+
+The MSE plot from the Lasso cross-validation shows that the mean-squared error does not significantly decrease with different values of lambda, the model's performance is relatively stable across a range of regularization parameters, suggesting that the model is not sensitive to overfitting.
+
+# Question 4
+Fit lasso to the original covariates and describe how it differs from PCR here.
+```{r}
+# Prepare data for direct Lasso on original currency returns
+x_original <- as.matrix(fx_returns[1:min_length,])
+y_vector_orig <- sp500_returns  # Use a different variable name
+
+# Handle missing values for original analysis
+complete_cases_orig <- complete.cases(x_original, y_vector_orig)
+x_original <- x_original[complete_cases_orig,]
+y_vector_orig <- y_vector_orig[complete_cases_orig]
+
+set.seed(456)  # Use a different seed
+cv_lasso_orig <- cv.glmnet(x_original, y_vector_orig, alpha=1)
+plot(cv_lasso_orig)
+
+# Fit lasso with optimal lambda
+lasso_model_orig <- glmnet(x_original, y_vector_orig, alpha=1, lambda=cv_lasso_orig$lambda.min)
+lasso_pred_orig <- predict(lasso_model_orig, x_original)
+
+# Print coefficients
+cat("Lasso coefficients for original currencies:\n")
+print(coef(lasso_model_orig))
+
+# Count non-zero coefficients
+nonzero_coefs <- sum(coef(lasso_model_orig)[-1] != 0)
+cat("Number of non-zero coefficients in direct Lasso:", nonzero_coefs, "\n")
+
+# Identify selected currencies
+if(nonzero_coefs > 0) {
+  selected_indices <- which(coef(lasso_model_orig)[-1] != 0)
+  selected_currencies <- colnames(x_original)[selected_indices]
+  cat("Selected currencies:", paste(selected_currencies, collapse=", "), "\n")
+} else {
+  cat("No currencies were selected by the Lasso model.\n")
+}
+
+# Compare predictions from both approaches
+par(mfrow=c(1,2))
+plot(y_vector_pc, lasso_pred, 
+     main="Lasso on PCs",
+     xlab="Actual S&P 500 Returns", ylab="Predicted Returns")
+abline(0, 1, col="red")
+
+plot(y_vector_orig, lasso_pred_orig, 
+     main="Lasso on Original Currencies",
+     xlab="Actual S&P 500 Returns", ylab="Predicted Returns")
+abline(0, 1, col="red")
+
+# Calculate RMSE for both approaches
+rmse_pc_lasso <- sqrt(mean((lasso_pred - y_vector_pc)^2))
+rmse_orig_lasso <- sqrt(mean((lasso_pred_orig - y_vector_orig)^2))
+
+cat("RMSE for Lasso on PCs:", rmse_pc_lasso, "\n")
+cat("RMSE for Lasso on original currencies:", rmse_orig_lasso, "\n")
+```
+
+Both the Lasso regression on principal components (PCs) and the Lasso regression on the original currency returns yielded no significant predictors. The Root Mean Squared Error for both models is approximately 42.50, suggesting that neither model is effectively predicting S&P 500 returns. The scatter plots for both Lasso models show that predicted returns are clustered around a narrow range, indicating that the models are not effectively capturing the variability in actual S&P 500 returns.
+
+1. **Feature Selection vs. Dimension Reduction**:
+   - PCR first reduces dimensions through PCA, then applies regression on selected components
+   - Direct Lasso performs feature selection on the original currencies
+
+2. **Interpretability**:
+   - PCR: Interpretations are based on principal components, which represent latent factors
+   - Direct Lasso: Interpretations are tied directly to specific currencies
+
+3. **Multicollinearity Handling**:
+   - PCR: Effectively handles multicollinearity by creating orthogonal components
+   - Direct Lasso: May struggle with highly correlated currencies, potentially selecting one from a correlated group
+
+4. **Sparsity**:
+   - PCR: Uses dense linear combinations of all currencies
+   - Direct Lasso: Creates a sparse model with only a few currencies
+
+5. **Predictive Performance**:
+   - Lasso: In this case, both models defaulted to predicting the mean response, indicating no significant relationship was found.
+   - PCR: Would still use the principal components even if their predictive power is weak.
+
+The direct Lasso approach identifies specific currencies that have the strongest relationship with S&P 500 returns, while PCR identifies latent factors. The comparison of RMSE values shows which approach provides better predictive performance in this context.
